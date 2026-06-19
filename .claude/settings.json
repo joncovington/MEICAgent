@@ -1,4 +1,29 @@
 {
+  "mcpServers": {
+    "tastytrade": {
+      "command": "tastytrade-mcp",
+      "env": {
+        "TASTYTRADE_SANDBOX": "true",
+        "ENABLE_LIVE_TRADING": "false",
+        "FORCE_DRY_RUN": "false",
+        "BUYING_POWER_BUFFER_PCT": "25",
+        "ACCOUNT_DEPLOY_LIMIT_PCT": "80"
+      }
+    },
+    "tastytrade-mock": {
+      "command": "tastytrade-mcp",
+      "args": [
+        "--mock",
+        "--mock-fixture",
+        "C:/Users/jonco/Claude/tastytrade-mcp/examples/mock_fixture.json",
+        "--enable-live-trading"
+      ],
+      "env": {
+        "BUYING_POWER_BUFFER_PCT": "25",
+        "ACCOUNT_DEPLOY_LIMIT_PCT": "80"
+      }
+    }
+  },
   "permissions": {
     "allow": [
       "Bash(python *)",

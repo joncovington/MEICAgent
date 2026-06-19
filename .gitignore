@@ -2,9 +2,9 @@
 config.json
 
 # Trade database and WAL files
-*.db
-*.db-shm
-*.db-wal
+data/*.db
+data/*.db-shm
+data/*.db-wal
 
 # Agent logs
 logs/*.log

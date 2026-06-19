@@ -1,0 +1,22 @@
+{
+  "symbol": "XSP",
+  "delta_target": 0.15,
+  "wing_width_candidates": [1, 2, 3, 5],
+  "quantity": 1,
+  "max_entries_per_day": 4,
+  "_max_entries_per_day_note": "Set to -1 to disable the hard cap and rely on buying power and AI judgment alone.",
+  "entry_window_start": "09:45",
+  "entry_window_end": "15:30",
+  "stop_trigger_ratio": 0.90,
+  "stop_limit_ratio": 0.95,
+  "max_stop_adjustments_per_ic": 3,
+  "cash_settled_symbols": ["SPX", "XSP", "NDX", "RUT"],
+  "sandbox": true,
+  "loop_interval_minutes": 5,
+  "email": {
+    "enabled": true,
+    "from": "jon.covington+MEICAgent@gmail.com",
+    "to": "jon.covington@gmail.com",
+    "_note": "SendGrid API key is stored in Windows Credential Manager. Run: python -c \"import keyring; keyring.set_password('meicagent', 'sendgrid_api_key', 'YOUR_KEY')\" to store it."
+  }
+}

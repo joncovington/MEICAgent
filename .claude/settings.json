@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(python db.py *)",
+      "Bash(python notify.py *)",
+      "Bash(python -c *)"
+    ]
+  }
+}

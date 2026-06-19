@@ -1,9 +1,6 @@
 # Local config (copy config.example.json to config.json and customize)
 config.json
 
-# Local test runner (copy tests/test_mock_run.example.py to tests/test_mock_run.py and set FIXTURE_PATH)
-tests/test_mock_run.py
-
 # Trade database and WAL files
 data/*.db
 data/*.db-shm

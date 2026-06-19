@@ -1,10 +1,6 @@
 """
 End-to-end test of MEICAgent loop phases against the tastytrade-mock MCP server.
 Runs all 6 phases from the /test-mcp skill and prints a plain English report.
-
-SETUP:
-  Copy this file to tests/test_mock_run.py, then run from the project root:
-    python tests/test_mock_run.py
 """
 from __future__ import annotations
 

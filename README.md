@@ -167,3 +167,24 @@ The agent places multiple Iron Condors throughout the 0DTE session, adapting to 
 - **Post-stop** — the remaining spread is re-evaluated every iteration (close, hold, or buy back just the short leg)
 - **EOD** — cash-settled symbols (SPX, XSP, NDX, RUT) can expire naturally; non-cash-settled positions are closed by 15:45 ET
 - **Conflict resolution** — when signals are ambiguous the agent takes the capital-protective default and logs a detailed plain English account for review
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for full terms.
+
+---
+
+## Disclaimer
+
+This software is provided for **educational and informational purposes only**. It is not financial advice, investment advice, trading advice, or any other type of advice.
+
+- The authors and contributors are not registered investment advisors, broker-dealers, or financial planners.
+- Nothing in this repository constitutes a recommendation to buy, sell, or hold any security or financial instrument.
+- Options trading involves substantial risk of loss and is not appropriate for all investors. 0DTE options carry extreme risk due to rapid time decay and gamma exposure.
+- Past performance of any strategy — simulated or live — does not guarantee future results.
+- You are solely responsible for all trading decisions and any resulting gains or losses.
+- Always consult a qualified financial professional before trading with real capital.
+
+**Use this software at your own risk. The authors accept no liability for any financial losses incurred through its use.**

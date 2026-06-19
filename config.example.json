@@ -14,9 +14,9 @@
   "sandbox": true,
   "loop_interval_minutes": 5,
   "email": {
-    "enabled": true,
-    "from": "jon.covington+MEICAgent@gmail.com",
-    "to": "jon.covington@gmail.com",
+    "enabled": false,
+    "from": "you+MEICAgent@example.com",
+    "to": "you@example.com",
     "_note": "SendGrid API key is stored in Windows Credential Manager. Run: python -c \"import keyring; keyring.set_password('meicagent', 'sendgrid_api_key', 'YOUR_KEY')\" to store it."
   }
 }

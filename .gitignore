@@ -1,3 +1,6 @@
+# Local config (copy config.example.json to config.json and customize)
+config.json
+
 # Trade database and WAL files
 data/*.db
 data/*.db-shm

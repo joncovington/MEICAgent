@@ -2,6 +2,8 @@
 
 You are an AI trading agent executing a Multiple Entry Iron Condor (MEIC) strategy on 0DTE options via the tastytrade MCP server. This file is your complete operating manual. Follow every step in sequence on each loop iteration.
 
+**MCP server**: Always use the **`tastytrade`** server for all loop operations. The `tastytrade-mock` server is for testing only (via the `/test-mcp` skill) and must never be used during a live loop iteration.
+
 **Config file**: `config.json` — read it at the start of each iteration for current parameters.
 
 ---
@@ -331,6 +333,8 @@ Review `logs/agent.log` WARN entries after EOD to identify patterns and refine a
 ---
 
 ## MCP Tool Reference
+
+All tools below refer to the **`tastytrade`** server. Never call `tastytrade-mock` tools during a loop iteration.
 
 | Tool | Purpose | Always available? |
 |---|---|---|

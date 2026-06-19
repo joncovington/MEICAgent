@@ -3,10 +3,7 @@ End-to-end test of MEICAgent loop phases against the tastytrade-mock MCP server.
 Runs all 6 phases from the /test-mcp skill and prints a plain English report.
 
 SETUP:
-  Copy this file to tests/test_mock_run.py and set FIXTURE_PATH below to the
-  absolute path of mock_fixture.json in your tastytrade-mcp clone.
-
-  Then run from the project root:
+  Copy this file to tests/test_mock_run.py, then run from the project root:
     python tests/test_mock_run.py
 """
 from __future__ import annotations
@@ -17,7 +14,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-FIXTURE_PATH = "/path/to/tastytrade-mcp/examples/mock_fixture.json"
+FIXTURE_PATH = str(Path(__file__).parent / "mock_fixture.json")
 CONFIG_PATH  = Path(__file__).parent.parent / "config.json"
 
 # ── helpers ──────────────────────────────────────────────────────────────────

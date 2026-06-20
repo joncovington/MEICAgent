@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     iv_pct_at_entry           REAL,
     session_quality           TEXT,
     trend_signal              TEXT,
+    iv_skew_signal            TEXT,
+    price_action_signal       TEXT,
     ai_entry_reasoning        TEXT,
     ic_order_id               TEXT UNIQUE NOT NULL,
     put_stop_order_id         TEXT,
@@ -104,6 +106,7 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     gross_pnl           REAL DEFAULT 0,
     fees                REAL DEFAULT 0,
     net_pnl             REAL DEFAULT 0,
+    closing_nlv         REAL,
     win_count           INTEGER DEFAULT 0,
     win_rate_pct        REAL,
     avg_iv_rank         REAL,
@@ -140,9 +143,18 @@ def cmd_init_db(_args):
             conn.execute(stmt)
     # Migrations: add columns that may be absent in databases created before this version
     existing = {row[1] for row in conn.execute("PRAGMA table_info(ic_trades)")}
-    for col, col_type in [("long_put_delta_at_entry", "REAL"), ("long_call_delta_at_entry", "REAL")]:
+    for col, col_type in [
+        ("long_put_delta_at_entry",  "REAL"),
+        ("long_call_delta_at_entry", "REAL"),
+        ("iv_skew_signal",           "TEXT"),
+        ("price_action_signal",      "TEXT"),
+    ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE ic_trades ADD COLUMN {col} {col_type}")
+    existing_ds = {row[1] for row in conn.execute("PRAGMA table_info(daily_summary)")}
+    for col, col_type in [("closing_nlv", "REAL")]:
+        if col not in existing_ds:
+            conn.execute(f"ALTER TABLE daily_summary ADD COLUMN {col} {col_type}")
     conn.commit()
     conn.close()
     _out({"ok": True, "message": "Database initialized"})
@@ -213,7 +225,7 @@ def cmd_get_eod_summary(_args):
         (today,)
     ).fetchall()
     summary_row = conn.execute(
-        "SELECT ai_day_summary FROM daily_summary WHERE summary_date = ?", (today,)
+        "SELECT ai_day_summary, closing_nlv FROM daily_summary WHERE summary_date = ?", (today,)
     ).fetchone()
     conn.close()
 
@@ -234,6 +246,7 @@ def cmd_get_eod_summary(_args):
         "avg_iv_rank": avg_iv,
         "sessions_entered": sessions,
         "ai_day_summary": summary_row["ai_day_summary"] if summary_row else None,
+        "closing_nlv": float(summary_row["closing_nlv"]) if summary_row and summary_row["closing_nlv"] else None,
         "trades": trades,
         "loop_log": [dict(r) for r in loop_rows],
     })
@@ -365,14 +378,18 @@ def cmd_log_loop_action(args):
 def cmd_save_daily_summary(args):
     now = str(_now_et())
     date = args.date or _today_et()
+    if not args.summary and args.closing_nlv is None:
+        _out({"ok": False, "error": "Provide --summary and/or --closing_nlv"})
+        return
     conn = _connect()
     conn.execute(
-        """INSERT INTO daily_summary (summary_date, ai_day_summary, created_at, updated_at)
-           VALUES (?, ?, ?, ?)
+        """INSERT INTO daily_summary (summary_date, ai_day_summary, closing_nlv, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(summary_date) DO UPDATE SET
-             ai_day_summary = excluded.ai_day_summary,
+             ai_day_summary = COALESCE(excluded.ai_day_summary, ai_day_summary),
+             closing_nlv = COALESCE(excluded.closing_nlv, closing_nlv),
              updated_at = excluded.updated_at""",
-        (date, args.summary, now, now)
+        (date, args.summary, args.closing_nlv, now, now)
     )
     conn.commit()
     conn.close()
@@ -411,7 +428,8 @@ def main():
 
     p_dsum = sub.add_parser("save_daily_summary")
     p_dsum.add_argument("--date", default=None)
-    p_dsum.add_argument("--summary", required=True)
+    p_dsum.add_argument("--summary", default=None)
+    p_dsum.add_argument("--closing_nlv", default=None, type=float)
 
     p_log = sub.add_parser("log_loop_action")
     p_log.add_argument("--action", required=True)

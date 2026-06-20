@@ -23,28 +23,60 @@ If `max_entries_per_day != -1` AND `today_count >= max_entries_per_day` → **sk
 
 ---
 
-## STEP 3: Market Assessment
+## STEP 2: Time Gate
 
-The MCP gates on market hours — if the market is closed the tools will reflect that. Call MCP tools in this order. Abort the iteration if any required step fails.
-
-Get current Eastern Time for session classification:
+Get current Eastern Time:
 ```bash
 python -c "import pytz, datetime; et=pytz.timezone('America/New_York'); now=datetime.datetime.now(et); print(now.strftime('%Y-%m-%d %H:%M:%S %Z'))"
 ```
 
+Read `config.json` for `nyse_holidays_<year>` (key is year-specific, e.g. `nyse_holidays_2026`).
+
+**Stop the iteration — skip directly to Step 7 with `action=time_gate_stop` — if any condition is true:**
+- Current ET time is before 09:30 (pre-market)
+- Current ET time is after 15:55 (market closed; EOD sequence handled in Step 7 at 15:55)
+- Today is Saturday or Sunday
+- Today's date appears in `config.nyse_holidays_<year>`
+
+Otherwise record the current ET time and session window — you will need both throughout this iteration.
+
+---
+
+## STEP 3: Market Assessment
+
+Call MCP tools as described below. Abort the iteration if any required step fails.
+
 ### 3a. Connection check
 Call `get_connection_status`. If `ok != true` → log error, stop iteration.
 
+### 3b–3c + working orders (parallel batch)
+After the connection check passes, issue the following three calls **in parallel** — they have no dependencies on each other:
+- `get_account_info` (→ 3b below)
+- `get_market_overview` with `symbols: [config.symbol]` (→ 3c below)
+- `get_working_orders` (→ used in Step 4 stop management; fetch here to avoid a separate round-trip)
+
 ### 3b. Account info
-Call `get_account_info`. Extract:
+Extract from `get_account_info`:
 - `derivative_buying_power` — factor into entry decision; minimum required is `chosen_wing_width × 100` per IC (max spread loss on the wider spread), plus a buffer you judge appropriate. Wing width is chosen in Step 3e — eliminate candidate widths that exceed available buying power before comparing them.
-- `net_liquidating_value` (compare to prior day if known; if dropped > 5% → halt entries, send alert)
+- `net_liquidating_value` — compare to yesterday's `closing_nlv`:
+  ```bash
+  python -c "
+  import sqlite3, json, datetime
+  conn = sqlite3.connect('data/meic_trades.db')
+  conn.row_factory = sqlite3.Row
+  yd = str(datetime.date.today() - datetime.timedelta(days=1))
+  r = conn.execute('SELECT closing_nlv FROM daily_summary WHERE summary_date=?', (yd,)).fetchone()
+  print(json.dumps({'closing_nlv': float(r['closing_nlv']) if r and r['closing_nlv'] else None}))
+  conn.close()
+  "
+  ```
+  If `closing_nlv` is available and today's NLV has dropped > 5% → **halt all entries** and send alert. If no prior-day record exists (first day), proceed normally.
 
 ### 3c. Market overview
-Call `get_market_overview` with `symbols: [config.symbol]`. Extract:
-- `iv_rank` (0–100)
+Extract from `get_market_overview`:
+- `iv_rank` (0–1 float, e.g. 0.38 = 38th percentile)
 - `iv_percentile`
-- Underlying last price
+- Underlying last price (the `last` field in the symbol's metrics entry)
 
 ### 3d. Option chain
 
@@ -85,6 +117,7 @@ Call `get_strategies` in parallel for each width in `config.wing_width_candidate
 - **High IV rank**: wider wings are more defensible; the elevated premium offsets the wider max-loss exposure
 - **Skewed market**: if one side is significantly more expensive, a wider wing on the cheaper side and narrower on the expensive side can improve credit/risk balance — choose the width that best centers the IC given current skew
 - **Subsequent entries**: consider how the new IC's strikes interact with already-open positions; avoid layering strikes too close together
+- **Elevated gamma at candidate short strikes**: if short-strike gamma from Step 3d is above 0.07, favor narrower wings — accelerating gamma means spread value can move sharply, and a narrower wing caps max loss
 
 Record the chosen width as `wing_width` and extract: put strike, call strike, leg symbols, estimated net credit, estimated POP.
 
@@ -99,19 +132,27 @@ Based on current ET time:
 | 14:30–15:30 | `late` | Very limited time; weigh credit, open exposure, and IV carefully |
 | After 15:30 | — | No new entries |
 
-### Classify trend signal
-Based on IV skew from Step 3d and price movement vs. prior close:
-- `neutral`: put IV and call IV within 0.01 of each other at equidistant OTM strikes, < 0.2% price move
-- `bearish_skew`: put IV > call IV at equidistant strikes, or sustained downward price movement
-- `bullish_skew`: call IV > put IV at equidistant strikes, or sustained upward price movement
+### Classify iv_skew_signal
+Based on option chain IV comparison from Step 3d at equidistant OTM strikes:
+- `bearish_skew`: put IV > call IV by 0.01 or more
+- `bullish_skew`: call IV > put IV by 0.01 or more
+- `neutral_skew`: difference < 0.01
 
 If greeks were unavailable in Step 3d, fall back to comparing OTM premiums at equivalent strike distances.
+
+### Classify price_action_signal
+Based on underlying price movement vs. prior close (or session open if prior close unavailable):
+- `bearish`: sustained downward move ≥ 0.2%
+- `bullish`: sustained upward move ≥ 0.2%
+- `neutral`: move < 0.2% in either direction
+
+Both signals are stored separately at entry (Step 6) as `iv_skew_signal` and `price_action_signal`.
 
 ---
 
 ## STEP 4: Stop Management
 
-Run on **every** iteration for all open trades. Query `get_working_orders` to get current live orders.
+Run on **every** iteration for all open trades. Use the `get_working_orders` result fetched in the Step 3 parallel batch.
 
 ### 4a. Detect filled stops
 For each open/pending trade in DB, check if its `put_stop_order_id` or `call_stop_order_id` is **absent from working orders** (meaning it filled or was cancelled).
@@ -179,7 +220,15 @@ For each `status=pending` trade where the IC order is **not** in working_orders 
 ### 4d. Evaluate stop tightening (for status=open trades)
 **Never loosen a stop.** Evaluate tightening only if `stop_adjustment_count < max_stop_adjustments_per_ic`.
 
-All trigger and limit prices are percentages of the **full IC net credit** (same basis as initial stop sizing). Use your judgment to choose a new trigger level that reflects current risk — considering time elapsed since entry, IV rank changes, underlying movement relative to short strikes, and current spread value. Maintain a gap between trigger and limit to allow for fill execution. Document your reasoning and the new levels chosen.
+All trigger and limit prices are expressed as fractions of the **full IC net credit** (same basis as initial stop sizing). Use the reference thresholds below as starting points, then apply your judgment given current conditions. When multiple conditions apply, use the lowest (tightest) trigger. Maintain a 0.05 credit-fraction gap between trigger and limit (e.g., trigger 0.82 → limit 0.87). Document your reasoning and the levels chosen.
+
+| Condition | Reference trigger |
+|---|---|
+| After 14:00 ET AND entered before 11:00 (aged position) | 0.85 |
+| IV rank has risen > 0.15 (0–1 scale) since entry | 0.80 |
+| Underlying moved > 0.3% against a short strike | 0.82 |
+| Short strike gamma > 0.08 (accelerating near-expiry) | 0.80 |
+| < 90 min to expiry AND current spread value < 50% of credit | 0.75 |
 
 If tightening is warranted (new trigger < current trigger):
 1. `close_position(order_id=<stop_order_id>)` — cancel old stop
@@ -193,7 +242,7 @@ If tightening is warranted (new trigger < current trigger):
 
 For each IC with `status=open`, evaluate each spread individually using current option chain prices:
 
-**Force-close any spread with unacceptable gamma risk** — use judgment on proximity of the underlying to the short strike, time remaining, and how fast the spread value is moving. Stops may not react fast enough near expiry.
+**Force-close any spread with unacceptable gamma risk** — triggers include: underlying within 0.5% of the short strike with < 30 min remaining, short-strike gamma above 0.10, or spread value accelerating faster than stops can track. Stops may not react fast enough near expiry.
 - `execute_trade` BTC the at-risk spread (dry_run=true first, then false)
 - Log exit reason as `force_close_near_strike`
 
@@ -234,10 +283,12 @@ python db.py update_trade --ic_order_id=<X> --exit_analysis='<updated json>'
 - `max_entries_per_day != -1` AND `today_count >= max_entries_per_day`
 - Current time > `entry_window_end` (15:30)
 - Buying power is insufficient
+- `net_credit < config.min_credit` (premium too thin to justify the risk and fees)
+- `net_credit > config.max_credit` (unusually wide — verify before accepting)
 
 **Use AI judgment on everything else.** Key inputs:
 - Session quality and time remaining in the day
-- IV rank, IV percentile, and trend signal
+- IV rank, IV percentile, and trend signals (`iv_skew_signal`, `price_action_signal`)
 - Credit available vs. fees and risk
 - POP estimate from `get_strategies`
 - Number and positioning of already-open ICs
@@ -277,12 +328,12 @@ Only run this step if Step 5 decided to enter.
 
 5. Save to DB immediately (status=`pending`):
    ```bash
-   python db.py save_trade --data='{"ic_order_id":"<id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","trend_signal":"<TS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
+   python db.py save_trade --data='{"ic_order_id":"<id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
    ```
 
 6. Send entry alert:
    ```bash
-   python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC at $<credit> credit | <session> session | <trend> | strikes <put>/<call> | IV rank <iv>"
+   python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC at $<credit> credit | <session> session | <iv_skew_signal> | strikes <put>/<call> | IV rank <iv>"
    ```
 
 ---
@@ -306,9 +357,14 @@ python notify.py log_event --level=INFO \
 ### EOD sequence (after 15:55 ET, run once per day)
 Check if today's EOD has already been logged (query `loop_log` for action=`eod` on today's date). If not:
 
-**1. Spawn the `/eod-report` skill as a subagent.** It will gather the data, read the log file, write the analysis, save it, and send the email.
+**1. Persist today's closing NLV** (use `net_liquidating_value` from the most recent `get_account_info` call this session):
+```bash
+python db.py save_daily_summary --closing_nlv=<nlv>
+```
 
-**2. Once the subagent completes:**
+**2. Spawn the `/eod-report` skill as a subagent.** It will gather the data, read the log file, write the analysis, save it, and send the email.
+
+**3. Once the subagent completes:**
 ```bash
 python db.py log_loop_action --action="eod" --reasoning="End of day sequence complete. Analysis delegated to /eod-report subagent."
 ```

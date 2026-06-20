@@ -172,6 +172,37 @@ Prints a live summary of open positions, today's P&L, and the last few loop acti
 
 ---
 
+## Dashboard
+
+A local browser dashboard provides a live view of the trading session and historical analytics.
+
+```
+/dashboard
+```
+
+Or start it directly:
+
+```bash
+python dashboard.py
+```
+
+Opens at `http://localhost:5050` and auto-refreshes every 30 seconds.
+
+**Today view**
+- Multi-period stats grid — Net P&L, total trades, wins, losses, and W/L ratio across today / this week / this month / this year / all-time
+- Trades table — each IC with entry time, strikes, wing width, per-spread credits, per-spread stop status badges (e.g. `STOPPED 11:21`), and P&L
+
+**History view**
+- NLV trend chart — account value over all days where the EOD sequence has run
+- Session win rate breakdown
+- Exit reason breakdown
+- Avg P&L by IV rank bucket
+- All-time fee drag summary
+
+The dashboard reads directly from `data/meic_trades.db` — no extra dependencies beyond what is already installed. Stop it by closing the terminal window it opened.
+
+---
+
 ## End-of-day report
 
 After 15:55 ET the agent automatically spawns the `/eod-report` skill, which:
@@ -197,9 +228,11 @@ MEICAgent/
 ├── config.example.json              # Config template — copy to config.json
 ├── db.py                            # SQLite CLI helper
 ├── notify.py                        # SendGrid email + structured log CLI helper
+├── dashboard.py                     # Local browser dashboard (port 5050)
 ├── .claude/
 │   ├── settings.json                # MCP server wiring for Claude Code
 │   └── commands/
+│       ├── dashboard.md             # /dashboard skill
 │       ├── eod-report.md            # /eod-report skill
 │       └── meic-status.md           # /meic-status skill
 ├── data/                            # Created at first run (gitignored)

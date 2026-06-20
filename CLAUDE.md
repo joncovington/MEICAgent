@@ -324,7 +324,27 @@ Only run this step if Step 5 decided to enter.
 
 1. Call `get_strategies` again for fresh leg symbols (prices move between assessments).
 
-### 6a. Combo entry (`config.separate_spread_entry == false`, default)
+### Entry mode selection
+
+`config.separate_spread_entry` controls which order structure to use:
+- `false` (default): always use 4-leg combo → proceed to **6a**
+- `true`: always use separate 2-leg spreads → proceed to **6b**
+- `"auto"`: evaluate per-iteration as described below
+
+**For `"auto"` — choose per-iteration:**
+
+Favor **separate spreads (6b)** if any condition is true:
+- IV rank > 0.35 (markets are wider; separate limits reduce slippage)
+- Session is `late` or `open_volatile` (liquidity thinner; tighter spread limits fill better)
+- Two or more ICs are already open (faster fill per leg reduces the window of unhedged exposure)
+
+Favor **combo (6a)** otherwise — single atomic fill, simpler confirmation.
+
+**Fallback**: if combo was selected but its dry_run returns `warnings`, switch to separate spreads for this iteration without re-running Step 5.
+
+Log the mode chosen and the deciding condition in `ai_entry_reasoning`.
+
+### 6a. Combo entry (`config.separate_spread_entry == false`, or `"auto"` chose combo)
 
 2. Dry-run (HARD LIMIT #1):
    ```json
@@ -357,7 +377,7 @@ Only run this step if Step 5 decided to enter.
    python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC at $<credit> credit | <session> session | <iv_skew_signal> | strikes <put>/<call> | IV rank <iv>"
    ```
 
-### 6b. Separate spread entry (`config.separate_spread_entry == true`)
+### 6b. Separate spread entry (`config.separate_spread_entry == true`, or `"auto"` chose separate)
 
 Generate a local IC group ID before placing any orders — this becomes `ic_order_id` in the DB:
 ```bash

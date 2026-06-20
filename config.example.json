@@ -10,7 +10,7 @@
   "min_credit": 0.50,
   "max_credit": 5.00,
   "separate_spread_entry": false,
-  "_separate_spread_entry_note": "When true, the put and call spreads are placed as two separate 2-leg limit orders instead of one 4-leg combo. May improve fills on liquid underlyings. Requires partial_entry status handling in stop management.",
+  "_separate_spread_entry_note": "Controls IC order structure. false = always 4-leg combo. true = always separate 2-leg spreads. \"auto\" = agent evaluates per-iteration: favors separate when IV rank > 0.35, session is late/open_volatile, or 2+ ICs already open; falls back to separate if combo dry_run returns warnings.",
   "stop_trigger_ratio": 0.90,
   "stop_limit_ratio": 0.95,
   "max_stop_adjustments_per_ic": 3,

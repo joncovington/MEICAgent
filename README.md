@@ -26,8 +26,8 @@ cp config.example.json config.json   # then edit config.json
 # 3. Initialize the database
 python db.py init_db
 
-# 4. Open in Claude Code and start the loop (before 9:30 ET)
-/loop
+# 4. Open in Claude Code and start the session (before 9:30 ET)
+/MEIC-start
 ```
 
 See [docs/setup.md](docs/setup.md) for the full setup walkthrough.
@@ -50,9 +50,12 @@ MEICAgent/
 ├── .claude/
 │   ├── settings.json                # MCP server wiring for Claude Code
 │   └── commands/
+│       ├── MEIC-start.md            # /MEIC-start skill — launch full session
 │       ├── dashboard.md             # /dashboard skill
 │       ├── eod-report.md            # /eod-report skill
-│       └── meic-status.md           # /meic-status skill
+│       ├── meic-status.md           # /meic-status skill
+│       ├── test-mcp.md              # /test-mcp skill
+│       └── watchdog.md              # /watchdog skill
 ├── data/                            # Created at first run (gitignored)
 │   └── meic_trades.db
 └── logs/                            # Created at first run (gitignored)

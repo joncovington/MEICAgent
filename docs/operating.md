@@ -2,24 +2,30 @@
 
 ## Pre-market session setup
 
-Run these three steps in order before 9:30 ET. Each opens in its own named terminal window.
+Run `/MEIC-start` before 9:30 ET — it launches the watchdog, dashboard, and agent loop in sequence:
 
-**1. Start the watchdog** — alerts via email and Windows toast if the loop stops running:
+```
+/MEIC-start
+```
+
+This opens two named terminal windows (watchdog + dashboard), opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not trade before 9:30 ET or after 15:55 ET, so starting early is safe.
+
+To start components individually instead:
+
+**Watchdog** — alerts via email and Windows toast if the loop stops running:
 ```
 /watchdog
 ```
 
-**2. Start the dashboard** — opens the browser at `http://localhost:5050`, auto-refreshes every 30 s:
+**Dashboard** — opens the browser at `http://localhost:5050`, auto-refreshes every 30 s:
 ```
 /dashboard
 ```
 
-**3. Start the loop** — begins the MEIC agent iterations:
+**Loop** — begins the MEIC agent iterations:
 ```
 /loop
 ```
-
-The agent will not trade before 9:30 ET or after 15:55 ET, so starting early is safe.
 
 ---
 

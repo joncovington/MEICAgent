@@ -142,7 +142,7 @@ def cmd_send_eod_email(_args):
             lines.append(
                 f"  {t.get('ic_order_id','?')} | {t.get('status','?')} | "
                 f"credit={t.get('net_credit') or 0:.2f} | pnl={t.get('pnl') or 0:.2f} | "
-                f"{t.get('session_quality','?')} | {t.get('trend_signal','?')}"
+                f"{t.get('session_quality','?')} | {t.get('iv_skew_signal','?')} | {t.get('price_action_signal','?')}"
             )
             if t.get("ai_entry_reasoning"):
                 lines.append(f"    entry: {t['ai_entry_reasoning']}")

@@ -95,7 +95,7 @@ Extract from `get_market_overview`:
 
 Derive:
 - ATM strike — closest to current underlying price
-- Short strike delta confirmation — verify the strikes `get_strategies` will return are near `config.short_delta` (put delta negative, call delta positive)
+- Short strike delta confirmation — verify the strikes `get_strategies` will return are near `config.delta_target` (put delta negative, call delta positive)
 - Put/call IV skew — compare `iv` at equidistant OTM strikes (→ see "Classify iv_skew_signal" below)
 - Gamma at the candidate short strikes — high/rising gamma on a threatened short strike argues for tighter stops (Step 4d) or force-close (Step 4e)
 
@@ -110,7 +110,7 @@ Derive:
 - `greeks_received: 0` means the feed is unavailable — proceed on premium/delta-target heuristics and log it; never halt solely because greeks are missing
 
 ### 3e. Strategy candidates — wing width selection
-Call `get_strategies` in parallel for each width in `config.wing_width_candidates`, using the same `symbol`, `target_dte: 0`, and `short_delta` each time. Filter out any width where `width × 100 > available_buying_power_with_buffer`. From the remaining candidates, choose the width that best fits current conditions:
+Call `get_strategies` in parallel for each width in `config.wing_width_candidates`, using the same `symbol`, `target_dte: 0`, and `short_delta: config.delta_target` each time. Filter out any width where `width × 100 > available_buying_power_with_buffer`. From the remaining candidates, choose the width that best fits current conditions:
 
 - **Earlier in the session** (prime/midday): favor wider wings — more credit collected per entry, more room for the underlying to move
 - **Later in the session** (afternoon/late) or when multiple ICs are already open: favor narrower wings — lower max loss per spread limits tail risk as gamma accelerates

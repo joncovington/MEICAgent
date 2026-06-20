@@ -96,7 +96,7 @@ Extract from `get_market_overview`:
 Derive:
 - ATM strike — closest to current underlying price
 - Short strike delta confirmation — verify the strikes `get_strategies` will return are near `config.short_delta` (put delta negative, call delta positive)
-- Put/call skew — compare `iv` of the OTM put vs. OTM call at equal distance from ATM; put IV > call IV → `bearish_skew`; call IV > put IV → `bullish_skew`; difference < 0.01 → `neutral`
+- Put/call IV skew — compare `iv` at equidistant OTM strikes (→ see "Classify iv_skew_signal" below)
 - Gamma at the candidate short strikes — high/rising gamma on a threatened short strike argues for tighter stops (Step 4d) or force-close (Step 4e)
 
 **Strike window — read carefully:**
@@ -232,7 +232,7 @@ All trigger and limit prices are expressed as fractions of the **full IC net cre
 
 If tightening is warranted (new trigger < current trigger):
 1. `close_position(order_id=<stop_order_id>)` — cancel old stop
-2. `execute_trade` with new trigger/limit, `time_in_force: "Day"` (dry_run=true first, then false)
+2. `execute_trade` with new trigger/limit, `time_in_force: "Day"` (HARD LIMIT #1)
 3. Record adjustment:
    ```bash
    python db.py record_stop_adjustment --ic_order_id=<X> --new_trigger=<Y> --new_limit=<Z> --reason="<condition>"
@@ -243,11 +243,11 @@ If tightening is warranted (new trigger < current trigger):
 For each IC with `status=open`, evaluate each spread individually using current option chain prices:
 
 **Force-close any spread with unacceptable gamma risk** — triggers include: underlying within 0.5% of the short strike with < 30 min remaining, short-strike gamma above 0.10, or spread value accelerating faster than stops can track. Stops may not react fast enough near expiry.
-- `execute_trade` BTC the at-risk spread (dry_run=true first, then false)
+- `execute_trade` BTC the at-risk spread (HARD LIMIT #1)
 - Log exit reason as `force_close_near_strike`
 
 **Force-close if the IC is at a net debit** (total current spread value > original net credit):
-- `execute_trade` BTC all remaining open legs (dry_run=true first, then false)
+- `execute_trade` BTC all remaining open legs (HARD LIMIT #1)
 - Log exit reason as `force_close_eod`
 
 **Mark remaining open ICs as expired** for any IC that was not stopped or force-closed:
@@ -259,11 +259,7 @@ For each IC with `status=open`, evaluate each spread individually using current 
 
 ### 4f. Re-evaluate partial trades (every iteration)
 
-For each IC with `status=partial`, read `exit_analysis` to determine what legs are still open. Get current option chain prices for those legs and re-apply the same decision framework used in 4a:
-
-1. **Close the full remaining spread** if now favorable — update status to `stopped`, append evaluation to `exit_analysis`.
-2. **Close just the long leg** if it previously had value but momentum has stalled and holding further adds no expected P&L — update status to `stopped`.
-3. **Hold** — keep `partial`, append a new entry to the `evaluations` array in `exit_analysis` with current prices and reasoning.
+For each IC with `status=partial`, read `exit_analysis` to determine what legs are still open. Get current option chain prices for those legs and re-apply the same decision framework as Step 4a (close full spread / buy back short leg / hold).
 
 Key inputs to consider on each re-evaluation:
 - Current prices of remaining legs vs. last evaluation

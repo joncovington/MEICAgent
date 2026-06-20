@@ -36,7 +36,7 @@ cd MEICAgent
 ### 3. Install Python dependencies
 
 ```bash
-pip install keyring pytz sendgrid
+pip install keyring pytz sendgrid pytest pytest-asyncio
 ```
 
 ### 4. Configure the agent
@@ -95,6 +95,24 @@ The Claude Code MCP connection is pre-configured in `.claude/settings.json`. By 
 ```
 
 To go live, set both to `"true"` and update `"sandbox": false` in `config.json`.
+
+---
+
+## Running the tests
+
+The test suite uses `MockMCP` — a plain Python stub that returns realistic response dicts. No tastytrade connection or credentials required.
+
+```bash
+pytest
+```
+
+For a human-readable end-to-end report:
+
+```bash
+python tests/test_mock_run.py
+```
+
+Three scenarios are covered: `midday_normal` (3 open ICs, all stops working), `stop_filled` (one stop order disappears — IC stopped out), and `bp_rejected` (dry-run pre-flight returns buying-power rejection).
 
 ---
 

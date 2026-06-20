@@ -74,8 +74,8 @@ Extract from `get_account_info`:
 
 ### 3c. Market overview
 Extract from `get_market_overview`:
-- `iv_rank` (0–1 float, e.g. 0.38 = 38th percentile)
-- `iv_percentile`
+- `iv_rank` — returned as a string; convert with `float()` before use (0–1 scale, e.g. `"0.38"` = 38th percentile)
+- `iv_percentile` — also a string; convert with `float()` before use
 - Underlying last price (the `last` field in the symbol's metrics entry)
 
 ### 3d. Option chain

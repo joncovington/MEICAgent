@@ -154,8 +154,8 @@ class MockMCP:
                 {
                     "symbol": "XSP",
                     "last":                          580.0,
-                    "implied-volatility-rank":       0.38,
-                    "implied-volatility-percentile": 0.55,
+                    "implied-volatility-rank":       "0.38",
+                    "implied-volatility-percentile": "0.55",
                 }
             ],
         }

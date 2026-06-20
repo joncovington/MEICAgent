@@ -70,9 +70,11 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     iv_skew_signal            TEXT,
     price_action_signal       TEXT,
     ai_entry_reasoning        TEXT,
-    ic_order_id               TEXT UNIQUE NOT NULL,
-    put_stop_order_id         TEXT,
-    call_stop_order_id        TEXT,
+    ic_order_id                  TEXT UNIQUE NOT NULL,
+    put_spread_entry_order_id    TEXT,
+    call_spread_entry_order_id   TEXT,
+    put_stop_order_id            TEXT,
+    call_stop_order_id           TEXT,
     stop_trigger_original     REAL,
     stop_limit_original       REAL,
     stop_trigger_current      REAL,
@@ -146,8 +148,10 @@ def cmd_init_db(_args):
     for col, col_type in [
         ("long_put_delta_at_entry",  "REAL"),
         ("long_call_delta_at_entry", "REAL"),
-        ("iv_skew_signal",           "TEXT"),
-        ("price_action_signal",      "TEXT"),
+        ("iv_skew_signal",              "TEXT"),
+        ("price_action_signal",        "TEXT"),
+        ("put_spread_entry_order_id",  "TEXT"),
+        ("call_spread_entry_order_id", "TEXT"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE ic_trades ADD COLUMN {col} {col_type}")
@@ -168,7 +172,7 @@ def cmd_get_open_trades(_args):
     today = _today_et()
     conn = _connect()
     rows = conn.execute(
-        "SELECT * FROM ic_trades WHERE status IN ('pending','open','partial') AND trade_date = ?",
+        "SELECT * FROM ic_trades WHERE status IN ('pending','open','partial','partial_entry') AND trade_date = ?",
         (today,)
     ).fetchall()
     conn.close()
@@ -286,8 +290,10 @@ def cmd_update_trade(args):
     now = str(_now_et())
     fields = {}
     for attr in ("status", "exit_price", "exit_time", "exit_reason", "exit_analysis",
-                 "put_stop_order_id", "call_stop_order_id", "stop_trigger_current",
-                 "stop_limit_current", "pnl", "fees", "fill_confirmed_at"):
+                 "put_stop_order_id", "call_stop_order_id",
+                 "put_spread_entry_order_id", "call_spread_entry_order_id",
+                 "stop_trigger_current", "stop_limit_current",
+                 "pnl", "fees", "fill_confirmed_at"):
         val = getattr(args, attr, None)
         if val is not None:
             fields[attr] = val
@@ -416,8 +422,10 @@ def main():
     p_upd = sub.add_parser("update_trade")
     p_upd.add_argument("--ic_order_id", required=True)
     for f in ("status", "exit_price", "exit_time", "exit_reason", "exit_analysis",
-              "put_stop_order_id", "call_stop_order_id", "stop_trigger_current",
-              "stop_limit_current", "pnl", "fees", "fill_confirmed_at"):
+              "put_stop_order_id", "call_stop_order_id",
+              "put_spread_entry_order_id", "call_spread_entry_order_id",
+              "stop_trigger_current", "stop_limit_current",
+              "pnl", "fees", "fill_confirmed_at"):
         p_upd.add_argument(f"--{f}", default=None)
 
     p_adj = sub.add_parser("record_stop_adjustment")

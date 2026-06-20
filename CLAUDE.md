@@ -184,16 +184,39 @@ When setting `status=partial`, write `exit_analysis` as a JSON object capturing 
 ```
 
 ### 4b. Check for stale pending entries
-If a trade has `status=pending` and was entered more than 10 minutes ago → cancel it:
+
+**Combo entry** (`put_spread_entry_order_id` is NULL): if `status=pending` and entered > 10 min ago → cancel and mark cancelled:
 ```bash
-# Cancel via MCP
 close_position(order_id=<ic_order_id>)
-# Then update DB
 python db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=unfilled_timeout
 ```
 
+**Separate spread entry** (`put_spread_entry_order_id` is set):
+
+*status=pending (both spreads still working) > 10 min* → cancel both, mark cancelled:
+```bash
+close_position(order_id=<put_spread_entry_order_id>)
+close_position(order_id=<call_spread_entry_order_id>)
+python db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=unfilled_timeout
+```
+
+*status=partial_entry (one spread filled, other still working) > 10 min* → cancel the still-working spread, then close the filled spread to eliminate the unhedged position:
+```bash
+close_position(order_id=<pending_spread_order_id>)
+execute_trade(BTC the filled spread, HARD LIMIT #1)
+python db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=partial_entry_timeout
+```
+
 ### 4c. Confirm fills and place stops
-For each `status=pending` trade where the IC order is **not** in working_orders (it filled):
+
+**Combo entry** (`put_spread_entry_order_id` is NULL): check if `ic_order_id` is absent from working_orders → filled.
+
+**Separate spread entry** (`put_spread_entry_order_id` is set):
+- Both absent → both filled → proceed to open.
+- Only one absent → that spread filled; update status to `partial_entry`, note which spread is pending. Wait for next iteration — the pending spread may still fill.
+- Both still present → still pending, no action.
+
+For each trade confirmed fully filled:
 1. Update status to `open` and record `fill_confirmed_at`
 2. Place two DAY stop-limit orders (one put spread, one call spread).
 
@@ -299,9 +322,11 @@ python db.py update_trade --ic_order_id=<X> --exit_analysis='<updated json>'
 
 Only run this step if Step 5 decided to enter.
 
-1. Call `get_strategies` again for fresh leg symbols (prices move between assessments)
+1. Call `get_strategies` again for fresh leg symbols (prices move between assessments).
 
-2. Dry-run first:
+### 6a. Combo entry (`config.separate_spread_entry == false`, default)
+
+2. Dry-run (HARD LIMIT #1):
    ```json
    execute_trade({
      "time_in_force": "Day",
@@ -316,21 +341,66 @@ Only run this step if Step 5 decided to enter.
    }, dry_run=true)
    ```
 
-   If `ok=false` → **do not submit live**. Read `problems` and `buying_power` from the response. Log the rejection reason and skip to Step 7. The MCP enforces its own buying power buffer (`BUYING_POWER_BUFFER_PCT`, `ACCOUNT_DEPLOY_LIMIT_PCT` in settings); a rejection here means the account cannot safely absorb another position at this time. Do not retry in the same iteration.
+   If `ok=false` → **do not submit live**. Read `problems` and `buying_power`. Log the rejection and skip to Step 7. The MCP enforces its own buying power buffer (`BUYING_POWER_BUFFER_PCT`, `ACCOUNT_DEPLOY_LIMIT_PCT`); a rejection means the account cannot safely absorb another position. Do not retry in the same iteration.
 
-3. If dry_run `ok=true` → submit live: same call with `dry_run=false`
+3. If dry_run `ok=true` → submit live: same call with `dry_run=false`. Record `ic_order_id` from the broker response.
 
-4. Confirm via `get_working_orders` — order should appear
+4. Confirm via `get_working_orders` — order should appear.
 
-5. Save to DB immediately (status=`pending`):
+5. Save to DB (status=`pending`):
    ```bash
-   python db.py save_trade --data='{"ic_order_id":"<id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
+   python db.py save_trade --data='{"ic_order_id":"<broker_order_id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
    ```
 
 6. Send entry alert:
    ```bash
    python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC at $<credit> credit | <session> session | <iv_skew_signal> | strikes <put>/<call> | IV rank <iv>"
    ```
+
+### 6b. Separate spread entry (`config.separate_spread_entry == true`)
+
+Generate a local IC group ID before placing any orders — this becomes `ic_order_id` in the DB:
+```bash
+python -c "import pytz, datetime; et=pytz.timezone('America/New_York'); now=datetime.datetime.now(et); print('IC-' + now.strftime('%Y%m%d-%H%M%S-%f'))"
+```
+
+Estimate individual spread credits from Step 3d short-strike IV data:
+- `put_credit  = round(net_credit × short_put_iv  / (short_put_iv + short_call_iv), 2)`
+- `call_credit = round(net_credit - put_credit, 2)`
+
+If per-strike IV is unavailable, split evenly: `put_credit = call_credit = round(net_credit / 2, 2)`.
+
+**Place put spread** (HARD LIMIT #1):
+```json
+{"time_in_force": "Day", "order_type": "Limit", "price": <put_credit>,
+ "legs": [
+   {"instrument_type": "Equity Option", "symbol": "<short_put>", "quantity": <qty>, "action": "Sell to Open"},
+   {"instrument_type": "Equity Option", "symbol": "<long_put>",  "quantity": <qty>, "action": "Buy to Open"}
+ ]}
+```
+If dry_run `ok=false` → abort entry entirely, skip to Step 7.
+If ok → submit live, record `put_spread_entry_order_id`.
+
+**Place call spread** (HARD LIMIT #1):
+```json
+{"time_in_force": "Day", "order_type": "Limit", "price": <call_credit>,
+ "legs": [
+   {"instrument_type": "Equity Option", "symbol": "<short_call>", "quantity": <qty>, "action": "Sell to Open"},
+   {"instrument_type": "Equity Option", "symbol": "<long_call>",  "quantity": <qty>, "action": "Buy to Open"}
+ ]}
+```
+If dry_run `ok=false` → **immediately cancel the put spread** (`close_position(put_spread_entry_order_id)`), abort entry, skip to Step 7.
+If ok → submit live, record `call_spread_entry_order_id`.
+
+Save to DB (status=`pending`):
+```bash
+python db.py save_trade --data='{"ic_order_id":"<group_id>","symbol":"XSP","status":"pending","put_spread_entry_order_id":"<>","call_spread_entry_order_id":"<>","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
+```
+
+Send entry alert:
+```bash
+python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC (separate spreads) at $<credit> credit | <session> | <iv_skew_signal> | strikes <put>/<call>"
+```
 
 ---
 

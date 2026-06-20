@@ -17,7 +17,7 @@ print('db_exists' if os.path.exists(db) else 'no_db')
 ## Step 2 — Start as a hidden background process
 
 ```bash
-Start-Process python -ArgumentList 'watchdog.py' -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -WindowStyle Hidden
+Start-Process python -ArgumentList 'watchdog.py' -WorkingDirectory $PWD -WindowStyle Hidden
 ```
 
 Tell the user: "Watchdog started in the background — alerts via email and Windows toast if the loop stops for 15+ minutes during market hours."

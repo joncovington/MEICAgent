@@ -21,7 +21,7 @@ Tell the user: "Dashboard already running — opening browser at http://localhos
 If output is `not_running`: start the server as a hidden background process, then open the browser.
 
 ```bash
-Start-Process python -ArgumentList 'dashboard.py' -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -WindowStyle Hidden
+Start-Process python -ArgumentList 'dashboard.py' -WorkingDirectory $PWD -WindowStyle Hidden
 ```
 
 Wait 1 second, then open browser:

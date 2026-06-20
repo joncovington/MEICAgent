@@ -6,7 +6,8 @@
       "Bash(python notify.py *)",
       "Bash(python -c *)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git check-ignore *)"
     ]
   },
   "mcpServers": {
@@ -25,7 +26,7 @@
       "args": [
         "--mock",
         "--mock-fixture",
-        "C:/Users/jonco/Claude/tastytrade-mcp/examples/mock_fixture.json",
+        "tests/mock_fixture.json",
         "--enable-live-trading"
       ],
       "env": {

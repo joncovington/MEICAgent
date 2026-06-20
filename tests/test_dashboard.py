@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     put_delta_at_entry REAL, call_delta_at_entry REAL,
     long_put_delta_at_entry REAL, long_call_delta_at_entry REAL,
     underlying_price_entry REAL, iv_rank_at_entry REAL, iv_pct_at_entry REAL,
-    session_quality TEXT, trend_signal TEXT, iv_skew_signal TEXT,
+    session_quality TEXT, iv_skew_signal TEXT,
     price_action_signal TEXT, ai_entry_reasoning TEXT,
     ic_order_id TEXT UNIQUE NOT NULL,
     put_spread_entry_order_id TEXT, call_spread_entry_order_id TEXT,

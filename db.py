@@ -66,7 +66,6 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     iv_rank_at_entry          REAL,
     iv_pct_at_entry           REAL,
     session_quality           TEXT,
-    trend_signal              TEXT,
     iv_skew_signal            TEXT,
     price_action_signal       TEXT,
     ai_entry_reasoning        TEXT,
@@ -155,6 +154,9 @@ def cmd_init_db(_args):
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE ic_trades ADD COLUMN {col} {col_type}")
+    # Drop columns removed from the schema
+    if "trend_signal" in existing:
+        conn.execute("ALTER TABLE ic_trades DROP COLUMN trend_signal")
     existing_ds = {row[1] for row in conn.execute("PRAGMA table_info(daily_summary)")}
     for col, col_type in [("closing_nlv", "REAL")]:
         if col not in existing_ds:

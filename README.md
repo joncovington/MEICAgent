@@ -138,6 +138,18 @@ Three scenarios are covered: `midday_normal` (3 open ICs, all stops working), `s
 
 ---
 
+## Strategy overview
+
+The agent places multiple Iron Condors throughout the 0DTE session, adapting to market conditions on each entry:
+
+- **Wing width** — evaluated dynamically per entry across `wing_width_candidates`; wider early in the day for more credit, narrower late or when multiple ICs are open
+- **Stops** — DAY stop-limit orders sized to ~break-even on the full IC credit; tightened by AI judgment as the day progresses
+- **Post-stop** — the remaining spread is re-evaluated every iteration (close, hold, or buy back just the short leg)
+- **EOD** — cash-settled symbols (SPX, XSP, NDX, RUT) can expire naturally; non-cash-settled positions are closed by 15:45 ET
+- **Conflict resolution** — when signals are ambiguous the agent takes the capital-protective default and logs a detailed plain English account for review
+
+---
+
 ## Running the agent
 
 Open the MEICAgent folder in VS Code with the Claude Code extension (or run `claude` from this directory), then start the loop **before 9:30 ET**:
@@ -195,18 +207,6 @@ MEICAgent/
 └── logs/                            # Created at first run (gitignored)
     └── agent.log
 ```
-
----
-
-## Strategy overview
-
-The agent places multiple Iron Condors throughout the 0DTE session, adapting to market conditions on each entry:
-
-- **Wing width** — evaluated dynamically per entry across `wing_width_candidates`; wider early in the day for more credit, narrower late or when multiple ICs are open
-- **Stops** — DAY stop-limit orders sized to ~break-even on the full IC credit; tightened by AI judgment as the day progresses
-- **Post-stop** — the remaining spread is re-evaluated every iteration (close, hold, or buy back just the short leg)
-- **EOD** — cash-settled symbols (SPX, XSP, NDX, RUT) can expire naturally; non-cash-settled positions are closed by 15:45 ET
-- **Conflict resolution** — when signals are ambiguous the agent takes the capital-protective default and logs a detailed plain English account for review
 
 ---
 

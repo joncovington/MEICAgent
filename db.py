@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     quantity                  INTEGER DEFAULT 1,
     put_delta_at_entry        REAL,
     call_delta_at_entry       REAL,
+    long_put_delta_at_entry   REAL,
+    long_call_delta_at_entry  REAL,
     underlying_price_entry    REAL,
     iv_rank_at_entry          REAL,
     iv_pct_at_entry           REAL,
@@ -136,6 +138,11 @@ def cmd_init_db(_args):
         stmt = statement.strip()
         if stmt:
             conn.execute(stmt)
+    # Migrations: add columns that may be absent in databases created before this version
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(ic_trades)")}
+    for col, col_type in [("long_put_delta_at_entry", "REAL"), ("long_call_delta_at_entry", "REAL")]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE ic_trades ADD COLUMN {col} {col_type}")
     conn.commit()
     conn.close()
     _out({"ok": True, "message": "Database initialized"})

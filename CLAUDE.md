@@ -277,7 +277,7 @@ Only run this step if Step 5 decided to enter.
 
 5. Save to DB immediately (status=`pending`):
    ```bash
-   python db.py save_trade --data='{"ic_order_id":"<id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","trend_signal":"<TS>","ai_entry_reasoning":"<reasoning>"}'
+   python db.py save_trade --data='{"ic_order_id":"<id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","trend_signal":"<TS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
    ```
 
 6. Send entry alert:

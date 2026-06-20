@@ -6,217 +6,31 @@ The agent runs as a Claude Code `/loop` — on each iteration (~every 5 minutes 
 
 ---
 
-## Requirements
+## Documentation
 
-- **Python 3.11+**
-- **Claude Code** — [claude.ai/code](https://claude.ai/code)
-- **tastytrade-mcp** — [github.com/joncovington/tastytrade-mcp](https://github.com/joncovington/tastytrade-mcp)
-- **tastytrade account** — live account or developer sandbox (tastytrade does not offer paper trading; the developer sandbox is a separate environment for testing without real capital)
-- **SendGrid account** *(optional)* — free tier is sufficient; required only if `email.enabled` is set to `true` in `config.json`
+- [Setup](docs/setup.md) — installation, configuration, SendGrid, database init, going live
+- [Operating](docs/operating.md) — starting the loop, status, dashboard, EOD report, logs
+- [Strategy](docs/strategy.md) — MEIC structure, wing width selection, stops, post-stop evaluation, EOD handling
 
 ---
 
-## Setup
-
-### 1. Install tastytrade-mcp
-
-Follow the instructions at [github.com/joncovington/tastytrade-mcp](https://github.com/joncovington/tastytrade-mcp) to install and configure the MCP server. Verify it is available on your PATH:
+## Quick start
 
 ```bash
-tastytrade-mcp --help
-```
-
-### 2. Clone this repo
-
-```bash
-git clone https://github.com/joncovington/MEICAgent.git
-cd MEICAgent
-```
-
-### 3. Install Python dependencies
-
-```bash
+# 1. Install dependencies
 pip install keyring pytz pytest pytest-asyncio
-pip install sendgrid  # optional — only needed if email.enabled = true
-```
 
-### 4. Configure the agent
+# 2. Configure
+cp config.example.json config.json   # then edit config.json
 
-Copy the example config and edit it with your settings:
-
-```bash
-cp config.example.json config.json
-```
-
-Key fields to update in `config.json`:
-
-| Field | Description |
-|---|---|
-| `symbol` | Underlying to trade (e.g. `XSP`, `SPX`, `NDX`) |
-| `delta_target` | Short strike delta target (default `0.15`) |
-| `wing_width_candidates` | Wing widths to evaluate per entry (agent picks the best) |
-| `quantity` | Number of contracts per IC leg |
-| `max_entries_per_day` | Hard cap on entries (`-1` = no cap, rely on AI + buying power) |
-| `sandbox` | `true` to use the tastytrade developer sandbox, `false` for your live account |
-| `email.enabled` | `true` to send alerts via SendGrid (optional — logs are always written to `logs/agent.log` regardless) |
-| `email.from` | Verified SendGrid sender address |
-| `email.to` | Address to receive alerts |
-
-### 5. Store your SendGrid API key *(optional)*
-
-Skip this step if you are not using email alerts (`email.enabled: false` in `config.json`).
-
-The agent resolves the API key in this order:
-1. **OS keyring** (preferred) — uses your platform's native secret store
-2. **Environment variable** fallback — `MEICAGENT_SENDGRID_KEY`
-
-| Platform | Keyring backend |
-|---|---|
-| Windows | Windows Credential Manager |
-| macOS | Keychain |
-| Linux desktop | Secret Service (gnome-keyring / kwallet) |
-| Linux headless / server | No keyring available — use the env var fallback |
-
-**To store via keyring** (Windows, macOS, Linux desktop):
-
-```bash
-python -c "import keyring; keyring.set_password('meicagent', 'sendgrid_api_key', 'YOUR_SENDGRID_KEY')"
-```
-
-To verify:
-
-```bash
-python -c "import keyring; print(keyring.get_password('meicagent', 'sendgrid_api_key'))"
-```
-
-**To use the environment variable instead** (Linux headless, Docker, CI):
-
-```bash
-export MEICAGENT_SENDGRID_KEY=YOUR_SENDGRID_KEY
-```
-
-Add this to your shell profile or container environment so it persists across sessions.
-
-### 6. Initialize the database
-
-```bash
+# 3. Initialize the database
 python db.py init_db
-```
 
-This creates `data/meic_trades.db` (SQLite, WAL mode). Safe to run multiple times.
-
-### 7. Configure the MCP server
-
-The Claude Code MCP connection is pre-configured in `.claude/settings.json`. By default it runs in sandbox mode with live trading disabled:
-
-```json
-{
-  "TASTYTRADE_SANDBOX": "true",
-  "ENABLE_LIVE_TRADING": "false"
-}
-```
-
-To go live, set both to `"true"` and update `"sandbox": false` in `config.json`.
-
----
-
-## Running the tests
-
-The test suite uses `MockMCP` — a plain Python stub that returns realistic response dicts. No tastytrade connection or credentials required.
-
-```bash
-pytest
-```
-
-For a human-readable end-to-end report:
-
-```bash
-python tests/test_mock_run.py
-```
-
-Three scenarios are covered: `midday_normal` (3 open ICs, all stops working), `stop_filled` (one stop order disappears — IC stopped out), and `bp_rejected` (dry-run pre-flight returns buying-power rejection).
-
----
-
-## Strategy overview
-
-The agent places multiple Iron Condors throughout the 0DTE session, adapting to market conditions on each entry:
-
-- **Wing width** — evaluated dynamically per entry across `wing_width_candidates`; wider early in the day for more credit, narrower late or when multiple ICs are open
-- **Stops** — DAY stop-limit orders sized to ~break-even on the full IC credit; tightened by AI judgment as the day progresses
-- **Post-stop** — the remaining spread is re-evaluated every iteration (close, hold, or buy back just the short leg)
-- **EOD** — cash-settled symbols (SPX, XSP, NDX, RUT) can expire naturally; non-cash-settled positions are closed by 15:45 ET
-- **Conflict resolution** — when signals are ambiguous the agent takes the capital-protective default and logs a detailed plain English account for review
-
----
-
-## Running the agent
-
-Open the MEICAgent folder in VS Code with the Claude Code extension (or run `claude` from this directory), then start the loop **before 9:30 ET**:
-
-```
+# 4. Open in Claude Code and start the loop (before 9:30 ET)
 /loop
 ```
 
-The agent runs every ~5 minutes. The tastytrade MCP gates all market-hours checks, so starting early or leaving it running after close is safe — it will not attempt to trade outside market hours.
-
----
-
-## Checking status during the day
-
-```
-/meic-status
-```
-
-Prints a live summary of open positions, today's P&L, and the last few loop actions without interrupting the running loop.
-
----
-
-## Dashboard
-
-A local browser dashboard provides a live view of the trading session and historical analytics.
-
-```
-/dashboard
-```
-
-Or start it directly:
-
-```bash
-python dashboard.py
-```
-
-Opens at `http://localhost:5050` and auto-refreshes every 30 seconds.
-
-**Today view**
-- Multi-period stats grid — Net P&L, total trades, wins, losses, and W/L ratio across today / this week / this month / this year / all-time
-- Trades table — each IC with entry time, strikes, wing width, per-spread credits, per-spread stop status badges (e.g. `STOPPED 11:21`), and P&L
-
-**History view**
-- NLV trend chart — account value over all days where the EOD sequence has run
-- Session win rate breakdown
-- Exit reason breakdown
-- Avg P&L by IV rank bucket
-- All-time fee drag summary
-
-The dashboard reads directly from `data/meic_trades.db` — no extra dependencies beyond what is already installed. Stop it by closing the terminal window it opened.
-
----
-
-## End-of-day report
-
-After 15:55 ET the agent automatically spawns the `/eod-report` skill, which:
-
-1. Reads today's trades and loop log
-2. Writes a plain English analysis of entry quality, stop management, and what worked or didn't
-3. Saves the analysis to the `daily_summary` table
-4. Sends an EOD email via SendGrid
-
-You can also trigger it manually at any time:
-
-```
-/eod-report
-```
+See [docs/setup.md](docs/setup.md) for the full setup walkthrough.
 
 ---
 
@@ -229,6 +43,10 @@ MEICAgent/
 ├── db.py                            # SQLite CLI helper
 ├── notify.py                        # SendGrid email + structured log CLI helper
 ├── dashboard.py                     # Local browser dashboard (port 5050)
+├── docs/
+│   ├── setup.md                     # Installation and configuration
+│   ├── operating.md                 # Running and monitoring the agent
+│   └── strategy.md                  # MEIC strategy details
 ├── .claude/
 │   ├── settings.json                # MCP server wiring for Claude Code
 │   └── commands/

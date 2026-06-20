@@ -16,6 +16,11 @@ from pathlib import Path
 # Allow direct execution as a script (pytest adds tests/ to sys.path automatically)
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Windows cp1252 consoles choke on the Unicode box-drawing and check-mark characters
+# used in the report. Force UTF-8 output regardless of the system locale.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from mock_mcp import (
     MockMCP,
     ALL_STOPS,
@@ -57,7 +62,19 @@ async def run_test(agent_config: dict) -> dict:
         call(mcp, "get_working_orders"),
         call(mcp, "get_market_overview", {"symbols": [symbol]}),
     )
-    option_chain = await call(mcp, "get_option_chain", {"symbol": symbol})
+    # Extract underlying price for the ATM window before calling the chain
+    underlying_price = 580.0
+    for m in market_overview.get("metrics", []):
+        if m.get("symbol", "").upper() == symbol.upper():
+            underlying_price = float(m.get("last", underlying_price))
+            break
+    option_chain = await call(mcp, "get_option_chain", {
+        "symbol":         symbol,
+        "expiration":     str(date.today()),
+        "include_greeks": True,
+        "strike_count":   15,
+        "around_price":   underlying_price,
+    })
     results.update({
         "phase2_acct":           acct_info,
         "phase2_positions":      positions,
@@ -273,21 +290,38 @@ def print_report(results: dict, agent_config: dict) -> None:
     today_str   = str(date.today())
     expirations = sorted(chain.keys())
 
-    print(f"  Chain ok:      {chain_resp.get('ok')}")
-    print(f"  Expirations:   {expirations}")
+    print(f"  Chain ok:          {chain_resp.get('ok')}")
+    print(f"  Expirations:       {expirations}")
+    print(f"  greeks_complete:   {chain_resp.get('greeks_complete', False)}")
+    print(f"  greeks_received:   {chain_resp.get('greeks_received', 0)}")
 
     zero_dte = today_str in expirations
     print(f"  0DTE ({today_str}): {'✓ Found' if zero_dte else '✗ NOT FOUND'}")
 
     if zero_dte:
         print("  ✓ Chain uses today's date — 0DTE strikes are valid for get_strategies.")
+        strikes = chain[today_str]
+        print(f"\n  Strike count:  {len(strikes)} strikes")
+
+        sp = next((s for s in strikes if s["strike_price"] == "575" and s["option_type"] == "Put"),  None)
+        sc = next((s for s in strikes if s["strike_price"] == "585" and s["option_type"] == "Call"), None)
+        if sp and "delta" in sp:
+            print(f"\n  Short put  (575P): delta={sp['delta']:+.3f}  gamma={sp['gamma']:.3f}  theta={sp['theta']:.2f}  iv={sp['iv']:.3f}")
+        if sc and "delta" in sc:
+            print(f"  Short call (585C): delta={sc['delta']:+.3f}  gamma={sc['gamma']:.3f}  theta={sc['theta']:.2f}  iv={sc['iv']:.3f}")
+
+        if sp and sc and "iv" in sp:
+            put_iv, call_iv = sp["iv"], sc["iv"]
+            diff = put_iv - call_iv
+            if abs(diff) < 0.01:
+                skew_label = "neutral"
+            elif diff > 0:
+                skew_label = f"bearish_skew (put IV {put_iv:.3f} > call IV {call_iv:.3f})"
+            else:
+                skew_label = f"bullish_skew (call IV {call_iv:.3f} > put IV {put_iv:.3f})"
+            print(f"\n  Skew signal:   {skew_label}")
     else:
         print("  ✗ No 0DTE expiry. get_strategies will return incorrect DTE values.")
-
-    print(f"\n  Strike count:  {sum(len(v) for v in chain.values())} strikes across {len(chain)} expiry")
-    print("  Greeks:        not present in mock chain (expected — POP estimated from delta input)")
-    print("  ATM:           ~$580 inferred from position strikes (shorts at 575–588 puts, 585–590 calls)")
-    print("  Skew:          neutral (put/call credits approximately balanced in the scenario)")
 
     # ── 4. Strategy Candidates ────────────────────────────────────────────────
     print(f"\n4. STRATEGY CANDIDATES\n{hr}")
@@ -390,10 +424,10 @@ def print_report(results: dict, agent_config: dict) -> None:
 
     remaining = [
         "No DB interaction — get_open_trades / get_today_count / get_today_pnl are not exercised.",
-        "No greeks in mock chain — skew detection (Step 3d) cannot be validated here.",
         "Entry decision uses hardcoded today_count=3 (no live DB read).",
         "Stop tightening is evaluated against a static mid-day scenario — add more scenario",
         "  fixtures (e.g. late_session, iv_spike) to cover the full tightening decision matrix.",
+        "greeks_incomplete scenario not covered — fallback behavior (Steps 4d/4e) is untested.",
     ]
 
     if gaps:

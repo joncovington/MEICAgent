@@ -114,17 +114,85 @@ async def test_wider_wing_gives_more_credit(mock_midday):
     assert credits == sorted(credits), f"Credits not ascending with width: {credits}"
 
 @pytest.mark.asyncio
-async def test_wider_wing_gives_higher_pop(mock_midday):
+async def test_pop_stable_across_wing_widths(mock_midday):
+    """POP is determined by short strike delta, not wing width — must not vary with width."""
     pops = []
     for width in [1, 2, 3, 5]:
         r = await call(mock_midday, "get_strategies", {
             "symbol": "XSP", "target_dte": 0, "wing_width": width, "short_delta": 0.15,
         })
         pops.append(r["estimated_pop"])
-    assert pops == sorted(pops), f"POPs not ascending with width: {pops}"
+    assert len(set(pops)) == 1, f"POP varies with wing width but should not: {pops}"
+
+
+# ── Phase 3b: Option chain greeks ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_chain_plain_lookup_has_no_greeks(mock_midday):
+    """Plain lookup (no include_greeks) must not return greek fields — keeps the call fast."""
+    r = await call(mock_midday, "get_option_chain", {"symbol": "XSP"})
+    strikes = list(r["chain"].values())[0]
+    assert "delta" not in strikes[0]
+    assert "greeks_complete" not in r
+
+@pytest.mark.asyncio
+async def test_chain_greeks_present_when_requested(mock_midday):
+    r = await call(mock_midday, "get_option_chain", {
+        "symbol": "XSP", "expiration": str(date.today()),
+        "include_greeks": True, "strike_count": 15, "around_price": 580.0,
+    })
+    strikes = list(r["chain"].values())[0]
+    for s in strikes:
+        for field in ("delta", "gamma", "theta", "iv"):
+            assert field in s, f"Missing '{field}' in strike {s.get('strike_price')}"
+
+@pytest.mark.asyncio
+async def test_chain_greeks_complete_flag(mock_midday):
+    r = await call(mock_midday, "get_option_chain", {
+        "symbol": "XSP", "expiration": str(date.today()),
+        "include_greeks": True, "strike_count": 15, "around_price": 580.0,
+    })
+    assert r["greeks_complete"] is True
+    assert r["greeks_received"] > 0
+
+@pytest.mark.asyncio
+async def test_chain_short_put_delta_near_target(mock_midday):
+    """575P should have delta close to -0.15 — confirming it matches the short_delta target."""
+    r = await call(mock_midday, "get_option_chain", {
+        "symbol": "XSP", "expiration": str(date.today()),
+        "include_greeks": True, "strike_count": 15, "around_price": 580.0,
+    })
+    strikes = list(r["chain"].values())[0]
+    sp = next(s for s in strikes if s["strike_price"] == "575" and s["option_type"] == "Put")
+    assert abs(sp["delta"] - (-0.15)) < 0.02
+
+@pytest.mark.asyncio
+async def test_chain_put_iv_exceeds_call_iv_at_equidistant_strikes(mock_midday):
+    """Put IV should exceed call IV at equal distance from ATM — realistic equity put skew."""
+    r = await call(mock_midday, "get_option_chain", {
+        "symbol": "XSP", "expiration": str(date.today()),
+        "include_greeks": True, "strike_count": 15, "around_price": 580.0,
+    })
+    strikes = list(r["chain"].values())[0]
+    # 575P and 585C are each 5 points from ATM (580)
+    put_iv  = next(s["iv"] for s in strikes if s["strike_price"] == "575" and s["option_type"] == "Put")
+    call_iv = next(s["iv"] for s in strikes if s["strike_price"] == "585" and s["option_type"] == "Call")
+    assert put_iv > call_iv, f"Expected put IV {put_iv} > call IV {call_iv} (bearish skew)"
+
+@pytest.mark.asyncio
+async def test_market_overview_has_underlying_price(mock_midday):
+    r = await call(mock_midday, "get_market_overview", {"symbols": ["XSP"]})
+    xsp = next(m for m in r["metrics"] if m["symbol"] == "XSP")
+    assert float(xsp["last"]) > 0
 
 
 # ── Phase 4: Stop management ──────────────────────────────────────────────────
+
+def test_trigger_ratio_matches_claude_md():
+    assert _TRIGGER_RATIO == 0.90, f"CLAUDE.md specifies 0.90, got {_TRIGGER_RATIO}"
+
+def test_limit_ratio_matches_claude_md():
+    assert _LIMIT_RATIO == 0.95, f"CLAUDE.md specifies 0.95, got {_LIMIT_RATIO}"
 
 @pytest.mark.asyncio
 async def test_stop_triggers_follow_claude_formula(mock_midday):
@@ -237,3 +305,18 @@ async def test_preflight_bp_rejected_still_dry_run(mock_bp_rejected):
         "dry_run": True,
     })
     assert r["dry_run"] is True
+
+@pytest.mark.asyncio
+async def test_execute_trade_rejects_malformed_leg(mock_midday):
+    """A leg missing required fields should produce ok=False with a problem message."""
+    r = await call(mock_midday, "execute_trade", {
+        "order": {
+            "time_in_force": "Day",
+            "order_type": "Limit",
+            "price": -1.20,
+            "legs": [{"symbol": "XSP   260619C00585000"}],  # missing instrument_type, quantity, action
+        },
+        "dry_run": True,
+    })
+    assert r["ok"] is False
+    assert len(r.get("problems", [])) > 0

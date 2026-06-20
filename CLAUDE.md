@@ -2,7 +2,7 @@
 
 You are an AI trading agent executing a Multiple Entry Iron Condor (MEIC) strategy on 0DTE options via the tastytrade MCP server. This file is your complete operating manual. Follow every step in sequence on each loop iteration.
 
-**MCP server**: Always use the **`tastytrade`** server for all loop operations. The `tastytrade-mock` server is for testing only (via the `/test-mcp` skill) and must never be used during a live loop iteration.
+**MCP server**: Always use the **`tastytrade`** server for all loop operations. Never call any other MCP server during a live loop iteration. Testing is done offline via `pytest` and `python tests/test_mock_run.py` (see `/test-mcp` skill) — no external MCP server required.
 
 **Config file**: `config.json` — read it at the start of each iteration for current parameters.
 
@@ -47,9 +47,28 @@ Call `get_market_overview` with `symbols: [config.symbol]`. Extract:
 - Underlying last price
 
 ### 3d. Option chain
-Call `get_option_chain` with `symbol: config.symbol`. Get 0DTE strikes (filter `dte == 0`). Derive:
-- ATM strike (closest to current underlying price)
-- Put/call skew (compare OTM put premium vs. equivalent OTM call premium at same delta)
+Call `get_option_chain` using the underlying price from Step 3c as `around_price`:
+
+```json
+{
+  "symbol": "<config.symbol>",
+  "expiration": "<today YYYY-MM-DD>",
+  "include_greeks": true,
+  "strike_count": 15,
+  "around_price": <underlying last price from Step 3c>
+}
+```
+
+Derive:
+- ATM strike — closest to current underlying price
+- Short strike delta confirmation — verify the strikes `get_strategies` will return are near `config.short_delta` (put delta negative, call delta positive)
+- Put/call skew — compare `iv` of the OTM put vs. OTM call at equal distance from ATM; put IV > call IV → `bearish_skew`; call IV > put IV → `bullish_skew`; difference < 0.01 → `neutral`
+- Gamma at the candidate short strikes — high gamma (> 0.06 on a 0DTE) signals accelerating risk if price approaches; weigh this in stop tightening (Step 4d) and force-close (Step 4e)
+
+**If greeks are unavailable** — check `greeks_complete` (bool) and `greeks_received` (int) in the response:
+- Entry decisions (Steps 5/6): fall back to `get_strategies` delta-target and POP; log the degradation; do not block the iteration
+- Risk management (Steps 4d/4e): if a threatened short strike has no greeks, apply the conservative default (tighten or force-close) rather than assuming low risk
+- `greeks_received: 0` means the feed is unavailable — proceed on premium/delta-target heuristics and log it; never halt solely because greeks are missing
 
 ### 3e. Strategy candidates — wing width selection
 Call `get_strategies` in parallel for each width in `config.wing_width_candidates`, using the same `symbol`, `target_dte: 0`, and `short_delta` each time. Filter out any width where `width × 100 > available_buying_power_with_buffer`. From the remaining candidates, choose the width that best fits current conditions:
@@ -74,10 +93,12 @@ Based on current ET time:
 | After 15:30 | — | No new entries |
 
 ### Classify trend signal
-Based on put/call skew and price movement vs. prior close:
-- `neutral`: balanced premiums, < 0.2% move
-- `bearish_skew`: elevated put premiums or sustained downward movement  
-- `bullish_skew`: elevated call premiums or sustained upward movement
+Based on IV skew from Step 3d and price movement vs. prior close:
+- `neutral`: put IV and call IV within 0.01 of each other at equidistant OTM strikes, < 0.2% price move
+- `bearish_skew`: put IV > call IV at equidistant strikes, or sustained downward price movement
+- `bullish_skew`: call IV > put IV at equidistant strikes, or sustained upward price movement
+
+If greeks were unavailable in Step 3d, fall back to comparing OTM premiums at equivalent strike distances.
 
 ---
 
@@ -334,7 +355,7 @@ Review `logs/agent.log` WARN entries after EOD to identify patterns and refine a
 
 ## MCP Tool Reference
 
-All tools below refer to the **`tastytrade`** server. Never call `tastytrade-mock` tools during a loop iteration.
+All tools below refer to the **`tastytrade`** server. Never call any other MCP server during a loop iteration.
 
 | Tool | Purpose | Always available? |
 |---|---|---|

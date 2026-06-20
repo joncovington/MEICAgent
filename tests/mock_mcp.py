@@ -153,29 +153,52 @@ class MockMCP:
             "metrics": [
                 {
                     "symbol": "XSP",
+                    "last":                          580.0,
                     "implied-volatility-rank":       0.38,
                     "implied-volatility-percentile": 0.55,
                 }
             ],
         }
 
-    def _tool_get_option_chain(self, _: dict) -> dict:
+    # Per-strike greek data for the 8 strikes in the mock chain.
+    # Put IV slightly exceeds call IV at equidistant strikes — mild realistic put skew.
+    _GREEK_DATA: dict = {
+        ("Put",  565): {"delta": -0.05, "gamma": 0.015, "theta": -0.40, "iv": 0.195},
+        ("Put",  570): {"delta": -0.09, "gamma": 0.025, "theta": -0.65, "iv": 0.182},
+        ("Put",  575): {"delta": -0.15, "gamma": 0.038, "theta": -0.95, "iv": 0.172},
+        ("Put",  580): {"delta": -0.28, "gamma": 0.055, "theta": -1.35, "iv": 0.163},
+        ("Call", 580): {"delta":  0.28, "gamma": 0.055, "theta": -1.35, "iv": 0.158},
+        ("Call", 585): {"delta":  0.15, "gamma": 0.038, "theta": -0.95, "iv": 0.165},
+        ("Call", 590): {"delta":  0.09, "gamma": 0.025, "theta": -0.65, "iv": 0.172},
+        ("Call", 595): {"delta":  0.05, "gamma": 0.015, "theta": -0.40, "iv": 0.178},
+    }
+
+    _CHAIN_DEFS: list = [
+        (565, "Put"), (570, "Put"), (575, "Put"), (580, "Put"),
+        (580, "Call"), (585, "Call"), (590, "Call"), (595, "Call"),
+    ]
+
+    def _tool_get_option_chain(self, args: dict) -> dict:
         today = str(date.today())
-        return {
-            "ok": True,
-            "chain": {
-                today: [
-                    {"strike": 565, "option_type": "Put",  "symbol": _occ("P", 565)},
-                    {"strike": 570, "option_type": "Put",  "symbol": _occ("P", 570)},
-                    {"strike": 575, "option_type": "Put",  "symbol": _occ("P", 575)},
-                    {"strike": 580, "option_type": "Put",  "symbol": _occ("P", 580)},
-                    {"strike": 580, "option_type": "Call", "symbol": _occ("C", 580)},
-                    {"strike": 585, "option_type": "Call", "symbol": _occ("C", 585)},
-                    {"strike": 590, "option_type": "Call", "symbol": _occ("C", 590)},
-                    {"strike": 595, "option_type": "Call", "symbol": _occ("C", 595)},
-                ]
-            },
-        }
+        include_greeks = args.get("include_greeks", False)
+
+        strikes = []
+        for strike, opt_type in self._CHAIN_DEFS:
+            entry: dict = {
+                "strike_price":    str(strike),
+                "option_type":     opt_type,
+                "symbol":          _occ(opt_type[0], strike),
+                "streamer_symbol": f".XSP{_dte_str()}{opt_type[0]}{strike}",
+            }
+            if include_greeks:
+                entry.update(self._GREEK_DATA[(opt_type, strike)])
+            strikes.append(entry)
+
+        result: dict = {"ok": True, "chain": {today: strikes}}
+        if include_greeks:
+            result["greeks_complete"] = True
+            result["greeks_received"] = len(strikes)
+        return result
 
     def _tool_get_strategies(self, args: dict) -> dict:
         width = int(args.get("wing_width", 5))
@@ -183,11 +206,13 @@ class MockMCP:
         short_call = 585
         long_put   = short_put  - width * 5  # 5-point strike spacing
         long_call  = short_call + width * 5
+        # POP depends on short strike delta, not wing width — constant for fixed short_delta=0.15
+        short_delta = float(args.get("short_delta", 0.15))
         return {
             "ok": True,
             "expiration": str(date.today()),
             "dte": 0,
-            "estimated_pop": round(0.80 + width * 0.005, 3),
+            "estimated_pop": round(1.0 - 2 * short_delta, 3),
             "net_credit":    round(1.10 + width * 0.05,  2),
             "legs": {
                 "short_put":  {"symbol": _occ("P", short_put),  "strike": short_put,  "delta": -0.15},
@@ -206,6 +231,15 @@ class MockMCP:
                 "problems": ["Insufficient derivative buying power for this order."],
                 "buying_power": {"current_buying_power": "375.00", "effect": "Debit"},
             }
+        # Validate that each leg has the required fields
+        _REQUIRED_LEG_FIELDS = {"instrument_type", "symbol", "quantity", "action"}
+        problems = []
+        for i, leg in enumerate(args.get("order", {}).get("legs", [])):
+            missing = _REQUIRED_LEG_FIELDS - set(leg)
+            if missing:
+                problems.append(f"Leg {i}: missing required fields: {', '.join(sorted(missing))}")
+        if problems:
+            return {"ok": False, "dry_run": dry_run, "problems": problems}
         return {
             "ok": True,
             "dry_run": dry_run,

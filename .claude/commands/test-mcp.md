@@ -1,97 +1,35 @@
-Run a full end-to-end test of the MEICAgent loop against the `tastytrade-mock` MCP server and produce a plain English report of findings.
+Run the MEICAgent test suite and produce a plain English summary of results.
 
-**All MCP tool calls in this skill must use the `tastytrade-mock` server.**
-
----
-
-## Phase 1 — Connection
-
-Call `get_connection_status`.
-
-Check:
-- Did the call succeed?
-- Is `mock_mode: true`? If not, stop immediately — you are connected to the wrong server.
+The test suite uses `MockMCP` — a pure Python stub that returns realistic response dicts. No MCP server connection, tastytrade credentials, or external dependencies required.
 
 ---
 
-## Phase 2 — Account & Market State
+## Step 1 — Run pytest
 
-Call in parallel: `get_account_info`, `get_positions`, `get_working_orders`, `get_market_overview` (symbol from config.json).
+```bash
+python -m pytest tests/test_scenarios.py -v
+```
 
-Then call `get_option_chain` (symbol from config.json, filter dte == 0).
-
-Record:
-- Derivative buying power and net liquidating value
-- Number of open position legs (expect 12 for 3 ICs × 4 legs)
-- Number of working orders (expect 3 stop orders)
-- IV rank, IV percentile, underlying price
-- ATM strike and put/call skew derived from the chain
+Record: total passed, total failed, any error output.
 
 ---
 
-## Phase 3 — Strategy Candidates
+## Step 2 — Run the end-to-end report
 
-Call `get_strategies` in parallel for each width in `config.wing_width_candidates` using `strategy: "iron_condor"`, `target_dte: 0`, and `short_delta` from config.
+```bash
+python -X utf8 tests/test_mock_run.py
+```
 
-For each candidate record: put strike, call strike, net credit, estimated POP.
-
-Apply the wing width selection logic from CLAUDE.md Step 3e and identify which width you would choose given the mock scenario, and why.
-
----
-
-## Phase 4 — Stop Management Simulation
-
-Map each working order to its IC using the position and order data from Phase 2. For each of the 3 ICs:
-- Identify which stop order belongs to it (put spread stop vs. call spread stop)
-- Confirm the stop is still working (not filled)
-- Evaluate whether stop tightening would be warranted given the fixture's timestamp and market state, applying the judgment criteria from CLAUDE.md Step 4d
-- State clearly: tighten or hold, and why
+Record: the printed report (all 8 sections).
 
 ---
 
-## Phase 5 — Entry Decision Simulation
+## Step 3 — Summarize
 
-Using the account state and market data from Phase 2–3, work through the CLAUDE.md Step 5 entry decision:
-- Are any hard stops triggered? (max entries, time gate, buying power)
-- What does AI judgment say about a 4th IC entry given: session quality, IV rank, trend signal, existing open positions, best wing width candidate?
-- State the decision and full reasoning as you would write it in `ai_entry_reasoning`
+Write a plain English summary covering:
 
----
+1. **pytest result** — how many tests passed/failed. If any failed, quote the assertion error verbatim and identify which phase it belongs to (connection, account state, option chain, strategies, stop management, pre-flight).
 
-## Phase 6 — Order Execution Pre-flight
+2. **End-to-end report verdict** — what `test_mock_run.py` reported in section 8 (READY or NEEDS ATTENTION), and any failures or caveats listed.
 
-If Phase 5 concluded an entry would be appropriate, call `execute_trade` with `dry_run=true` using the best strategy candidate from Phase 3. Record the full response — particularly `ok`, `buying_power`, and any `problems`.
-
-If Phase 5 concluded no entry, call `execute_trade` with `dry_run=true` anyway using the best candidate — this validates the pre-flight path independently of the entry decision.
-
-Do **not** call `execute_trade` with `dry_run=false` at any point in this skill.
-
----
-
-## Phase 7 — Report
-
-Write a plain English test report covering all of the following. Be specific — use actual values from the fixture, not generalities.
-
-**1. Connection**
-Did the mock server connect cleanly? Was `mock_mode` confirmed?
-
-**2. State reading accuracy**
-Did the fixture data load as expected? Note actual counts of legs and working orders vs. what the fixture should contain. Flag any discrepancy.
-
-**3. Option chain quality**
-Was the chain populated with 0DTE strikes? Were greeks (delta, theta, IV) present? Was ATM derivable? Describe the put/call skew observed.
-
-**4. Strategy candidates**
-List each wing width evaluated, its credit and POP. Identify the selected width and explain the reasoning.
-
-**5. Stop management**
-For each of the 3 ICs: confirm stop mapping, tightening decision, and reasoning. Note if any stop appeared ambiguous or unmappable.
-
-**6. Entry decision**
-State the decision and reasoning. Note which hard stops (if any) blocked entry and which judgment factors were most influential.
-
-**7. Pre-flight result**
-State the dry-run outcome. If `ok=true`: confirm buying power and legs were accepted. If `ok=false`: quote the rejection reason verbatim.
-
-**8. Overall verdict**
-One paragraph: is the agent ready to run against a live/sandbox tastytrade session, or are there gaps to address first? List any tool calls that returned unexpected structure or missing fields — these are the things most likely to break in production.
+3. **Overall conclusion** — is the agent's MCP response parsing correct and ready to run against a live/sandbox tastytrade session? If any test failed, state clearly what needs to be fixed before going live.

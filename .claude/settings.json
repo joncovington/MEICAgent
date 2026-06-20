@@ -1,4 +1,14 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(python db.py *)",
+      "Bash(python notify.py *)",
+      "Bash(python -c *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  },
   "mcpServers": {
     "tastytrade": {
       "command": "tastytrade-mcp",
@@ -23,13 +33,5 @@
         "ACCOUNT_DEPLOY_LIMIT_PCT": "80"
       }
     }
-  },
-  "permissions": {
-    "allow": [
-      "Bash(python *)",
-      "Bash(python db.py *)",
-      "Bash(python notify.py *)",
-      "Bash(python -c *)"
-    ]
   }
 }

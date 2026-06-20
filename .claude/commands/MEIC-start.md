@@ -2,10 +2,10 @@ Start the full MEICAgent session: watchdog, dashboard, and agent loop.
 
 ## Step 1 — Watchdog
 
-Launch the watchdog in a new terminal:
+Launch the watchdog as a hidden background process:
 
 ```bash
-Start-Process powershell -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -ArgumentList '-NoExit', '-Command', '$host.UI.RawUI.WindowTitle = ''MEICAgent Watchdog''; python watchdog.py'
+Start-Process python -ArgumentList 'watchdog.py' -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -WindowStyle Hidden
 ```
 
 ## Step 2 — Dashboard
@@ -16,10 +16,10 @@ Check if dashboard is already running:
 python -c "import socket; s=socket.socket(); r=s.connect_ex(('127.0.0.1',5050)); s.close(); print('running' if r==0 else 'not_running')"
 ```
 
-If `not_running`: launch dashboard in a new terminal, then open the browser.
+If `not_running`: launch dashboard as a hidden background process, then open the browser.
 
 ```bash
-Start-Process powershell -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -ArgumentList '-NoExit', '-Command', '$host.UI.RawUI.WindowTitle = ''MEICAgent Dashboard''; python dashboard.py'
+Start-Process python -ArgumentList 'dashboard.py' -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -WindowStyle Hidden
 ```
 
 ```bash

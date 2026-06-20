@@ -49,15 +49,16 @@ Call MCP tools as described below. Abort the iteration if any required step fail
 ### 3a. Connection check
 Call `get_connection_status`. If `ok != true` → log error, stop iteration.
 
-### 3b–3c + working orders (parallel batch)
-After the connection check passes, issue the following three calls **in parallel** — they have no dependencies on each other:
+### 3b–3c + working orders + positions (parallel batch)
+After the connection check passes, issue the following four calls **in parallel** — they have no dependencies on each other:
 - `get_account_info` (→ 3b below)
 - `get_market_overview` with `symbols: [config.symbol]` (→ 3c below)
 - `get_working_orders` (→ used in Step 4 stop management; fetch here to avoid a separate round-trip)
+- `get_positions` (→ used in 3e broker reconciliation below)
 
 ### 3b. Account info
 Extract from `get_account_info`:
-- `derivative_buying_power` — factor into entry decision; minimum required is `chosen_wing_width × 100` per IC (max spread loss on the wider spread), plus a buffer you judge appropriate. Wing width is chosen in Step 3e — eliminate candidate widths that exceed available buying power before comparing them.
+- `derivative_buying_power` — factor into entry decision; minimum required is `chosen_wing_width × 100` per IC (max spread loss on the wider spread), plus a buffer you judge appropriate. Wing width is chosen in Step 3f — eliminate candidate widths that exceed available buying power before comparing them.
 - `net_liquidating_value` — compare to yesterday's `closing_nlv`:
   ```bash
   python -c "
@@ -109,7 +110,24 @@ Derive:
 - Risk management (Steps 4d/4e): if a threatened short strike has no greeks, apply the conservative default (tighten or force-close) rather than assuming low risk
 - `greeks_received: 0` means the feed is unavailable — proceed on premium/delta-target heuristics and log it; never halt solely because greeks are missing
 
-### 3e. Strategy candidates — wing width selection
+### 3e. Broker reconciliation
+
+Compare `get_positions` option symbols against the leg symbols stored in open/partial DB trades. This is a read-only check — never take automated corrective action; surface problems for human review only.
+
+**Check 1 — DB trade missing from broker positions:**
+For each DB trade with `status IN ('open', 'partial')`, verify that at least one of its leg symbols (`put_symbol`, `call_symbol`, `long_put_symbol`, `long_call_symbol`) appears in the broker position list. If none match → the position may have been closed outside the agent.
+
+**Check 2 — Broker position not in any DB trade:**
+For each option position returned by `get_positions`, check whether its symbol matches any leg in an open/partial DB trade. If no match → there is an unrecognized position in the account.
+
+If either check finds a mismatch, log a WARN and continue the iteration — do not halt, do not attempt to correct the DB or close positions:
+```bash
+python notify.py log_event --level=WARN \
+  --message="Broker reconciliation mismatch. DB trade <ic_order_id> leg symbols not found in broker positions — or broker holds unrecognized option symbols. Verify account manually. No automated action taken." \
+  --data='{"missing_from_broker":["<symbols>"],"unrecognized_at_broker":["<symbols>"]}'
+```
+
+### 3f. Strategy candidates — wing width selection
 Call `get_strategies` in parallel for each width in `config.wing_width_candidates`, using the same `symbol`, `target_dte: 0`, and `short_delta: config.delta_target` each time. Filter out any width where `width × 100 > available_buying_power_with_buffer`. From the remaining candidates, choose the width that best fits current conditions:
 
 - **Earlier in the session** (prime/midday): favor wider wings — more credit collected per entry, more room for the underlying to move

@@ -46,7 +46,7 @@ Key fields to update in `config.json`:
 
 | Field | Description |
 |---|---|
-| `symbol` | Underlying to trade (e.g. `XSP`, `SPX`, `NDX`) |
+| `symbol` | Underlying to trade (e.g. `SPX`, `XSP`, `NDX`) |
 | `delta_target` | Short strike delta target (default `0.15`) |
 | `wing_width_candidates` | Wing widths to evaluate per entry (agent picks the best) |
 | `quantity` | Number of contracts per IC leg |

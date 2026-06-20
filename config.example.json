@@ -1,5 +1,5 @@
 {
-  "symbol": "XSP",
+  "symbol": "SPX",
   "delta_target": 0.15,
   "wing_width_candidates": [1, 2, 3, 5],
   "quantity": 1,

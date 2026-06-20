@@ -455,11 +455,30 @@ python db.py log_loop_action \
 
 ```bash
 python notify.py log_event --level=INFO \
-  --message="[<HH:MM> ET] Open: <N> | Today: <M> | P&L: $<X> | Action: <action>"
+  --message="[<HH:MM> ET] Open: <N> | Today: <M> | P&L: \$<X> | Action: <action>"
 ```
 
-### EOD sequence (after 15:55 ET, run once per day)
-Check if today's EOD has already been logged (query `loop_log` for action=`eod` on today's date). If not:
+> **Shell escaping**: Always escape dollar signs as `\$` in bash double-quoted strings that contain currency values (P&L amounts, credits, prices). Unescaped `$0` expands to the shell path (`/usr/bin/bash`), producing corrupt log entries. This applies to `--reasoning`, `--message`, and any `--body` argument built with dollar-denominated values.
+
+### EOD sequence (after 15:55 ET, trading days only)
+Check if today's EOD has already been logged (query `loop_log` for action=`eod` on today's date). If already logged, skip.
+
+**Guard — skip on non-trading days**: Before running the EOD sequence, confirm that at least one non-`time_gate_stop` action was logged today:
+```bash
+python -c "
+import sqlite3, json, datetime
+conn = sqlite3.connect('data/meic_trades.db')
+conn.row_factory = sqlite3.Row
+today = str(datetime.date.today())
+n = conn.execute(\"SELECT COUNT(*) AS n FROM loop_log WHERE DATE(loop_time)=? AND action != 'time_gate_stop'\", (today,)).fetchone()['n']
+print(json.dumps({'has_trading_actions': n > 0}))
+conn.close()
+"
+```
+If `has_trading_actions: false` (weekend, NYSE holiday, or session never opened) → skip the EOD sequence entirely. Log the skip:
+```bash
+python db.py log_loop_action --action="eod" --reasoning="Non-trading day — EOD sequence skipped. No actions taken beyond time_gate_stop."
+```
 
 **1. Persist today's closing NLV** (use `net_liquidating_value` from the most recent `get_account_info` call this session):
 ```bash
@@ -472,6 +491,21 @@ python db.py save_daily_summary --closing_nlv=<nlv>
 ```bash
 python db.py log_loop_action --action="eod" --reasoning="End of day sequence complete. Analysis delegated to /eod-report subagent."
 ```
+
+### Loop self-pacing cadence
+
+After completing Step 7, schedule the next wakeup using these intervals:
+
+| Condition | Interval |
+|---|---|
+| Weekend or NYSE holiday (`time_gate_stop` due to day-of-week/holiday) | **1800s** |
+| Pre-market before 09:00 ET (> 30 min until open) | **900s** |
+| Pre-market 09:00–09:29 ET (approaching open) | **120s** |
+| Market hours with no open positions | **300s** |
+| Market hours with one or more open positions | **120s** |
+| After 15:55 ET on a trading day (EOD complete) | **1800s** |
+
+Use the longest applicable interval — this keeps weekend overnight churn to a minimum while maintaining tight monitoring when positions are open.
 
 ---
 

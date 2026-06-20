@@ -1,6 +1,6 @@
 # MEICAgent
 
-An AI-driven Multiple Entry Iron Condor (MEIC) trading agent for 0DTE options, powered by [Claude Code](https://claude.ai/code) and the tastytrade brokerage API.
+An AI-driven Multiple Entry Iron Condor (MEIC) strategy trading agent for 0DTE options, powered by [Claude Code](https://claude.ai/code) and the tastytrade brokerage API.
 
 The agent runs as a Claude Code `/loop` — on each iteration (~every 5 minutes during market hours) it reads persisted state, assesses market conditions, makes AI-driven entry and stop decisions, executes trades, and logs a plain English account of everything it did and why.
 

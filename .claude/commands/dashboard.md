@@ -21,7 +21,7 @@ Tell the user: "Dashboard already running — opening browser at http://localhos
 If output is `not_running`: open a new terminal window running the server, then open the browser.
 
 ```bash
-Start-Process powershell -ArgumentList '-NoExit', '-Command', 'cd \"c:\Users\jonco\Claude\MEICAgent\"; python dashboard.py'
+Start-Process powershell -ArgumentList '-NoExit', '-Command', '$host.UI.RawUI.WindowTitle = ''MEICAgent Dashboard''; cd \"c:\Users\jonco\Claude\MEICAgent\"; python dashboard.py'
 ```
 
 Wait 1 second, then open browser:

@@ -14,10 +14,10 @@ print('db_exists' if os.path.exists(db) else 'no_db')
 "
 ```
 
-## Step 2 — Start in a new terminal window
+## Step 2 — Start as a hidden background process
 
 ```bash
-Start-Process powershell -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -ArgumentList '-NoExit', '-Command', '$host.UI.RawUI.WindowTitle = ''MEICAgent Watchdog''; python watchdog.py'
+Start-Process python -ArgumentList 'watchdog.py' -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -WindowStyle Hidden
 ```
 
-Tell the user: "Watchdog started in a new terminal — alerts via email and Windows toast if the loop stops for 15+ minutes during market hours. Close that terminal to stop it."
+Tell the user: "Watchdog started in the background — alerts via email and Windows toast if the loop stops for 15+ minutes during market hours."

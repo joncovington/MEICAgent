@@ -18,10 +18,10 @@ Tell the user: "Dashboard already running — opening browser at http://localhos
 
 ## Step 2b — Not running
 
-If output is `not_running`: open a new terminal window running the server, then open the browser.
+If output is `not_running`: start the server as a hidden background process, then open the browser.
 
 ```bash
-Start-Process powershell -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -ArgumentList '-NoExit', '-Command', '$host.UI.RawUI.WindowTitle = ''MEICAgent Dashboard''; python dashboard.py'
+Start-Process python -ArgumentList 'dashboard.py' -WorkingDirectory 'c:\Users\jonco\Claude\MEICAgent' -WindowStyle Hidden
 ```
 
 Wait 1 second, then open browser:
@@ -29,4 +29,4 @@ Wait 1 second, then open browser:
 start http://localhost:5050
 ```
 
-Tell the user: "Dashboard started in a new terminal window at http://localhost:5050 · auto-refreshes every 30 s · close that terminal window to stop it"
+Tell the user: "Dashboard started at http://localhost:5050 · auto-refreshes every 30 s"

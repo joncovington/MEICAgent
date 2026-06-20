@@ -72,8 +72,8 @@ async def run_test(agent_config: dict) -> dict:
         "symbol":         symbol,
         "expiration":     str(date.today()),
         "include_greeks": True,
-        "strike_count":   15,
         "around_price":   underlying_price,
+        "greeks_timeout": 6.0,
     })
     results.update({
         "phase2_acct":           acct_info,

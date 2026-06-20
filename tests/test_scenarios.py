@@ -139,7 +139,7 @@ async def test_chain_plain_lookup_has_no_greeks(mock_midday):
 async def test_chain_greeks_present_when_requested(mock_midday):
     r = await call(mock_midday, "get_option_chain", {
         "symbol": "XSP", "expiration": str(date.today()),
-        "include_greeks": True, "strike_count": 15, "around_price": 580.0,
+        "include_greeks": True, "around_price": 580.0,
     })
     strikes = list(r["chain"].values())[0]
     for s in strikes:
@@ -150,7 +150,7 @@ async def test_chain_greeks_present_when_requested(mock_midday):
 async def test_chain_greeks_complete_flag(mock_midday):
     r = await call(mock_midday, "get_option_chain", {
         "symbol": "XSP", "expiration": str(date.today()),
-        "include_greeks": True, "strike_count": 15, "around_price": 580.0,
+        "include_greeks": True, "around_price": 580.0,
     })
     assert r["greeks_complete"] is True
     assert r["greeks_received"] > 0
@@ -160,7 +160,7 @@ async def test_chain_short_put_delta_near_target(mock_midday):
     """575P should have delta close to -0.15 — confirming it matches the short_delta target."""
     r = await call(mock_midday, "get_option_chain", {
         "symbol": "XSP", "expiration": str(date.today()),
-        "include_greeks": True, "strike_count": 15, "around_price": 580.0,
+        "include_greeks": True, "around_price": 580.0,
     })
     strikes = list(r["chain"].values())[0]
     sp = next(s for s in strikes if s["strike_price"] == "575" and s["option_type"] == "Put")
@@ -171,7 +171,7 @@ async def test_chain_put_iv_exceeds_call_iv_at_equidistant_strikes(mock_midday):
     """Put IV should exceed call IV at equal distance from ATM — realistic equity put skew."""
     r = await call(mock_midday, "get_option_chain", {
         "symbol": "XSP", "expiration": str(date.today()),
-        "include_greeks": True, "strike_count": 15, "around_price": 580.0,
+        "include_greeks": True, "around_price": 580.0,
     })
     strikes = list(r["chain"].values())[0]
     # 575P and 585C are each 5 points from ATM (580)

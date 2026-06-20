@@ -47,15 +47,17 @@ Call `get_market_overview` with `symbols: [config.symbol]`. Extract:
 - Underlying last price
 
 ### 3d. Option chain
-Call `get_option_chain` using the underlying price from Step 3c as `around_price`:
 
+`get_option_chain` returns instrument fields per strike. By default it returns only an **ATM window of ~31 strikes** (15 each side of the money), not the entire chain. To get per-strike greeks, add `include_greeks: true`. Greeks come from the live DXLink feed, so request them only when greeks drive a decision.
+
+**Recommended call:**
 ```json
 {
   "symbol": "<config.symbol>",
   "expiration": "<today YYYY-MM-DD>",
   "include_greeks": true,
-  "strike_count": 15,
-  "around_price": <underlying last price from Step 3c>
+  "around_price": <underlying last price from Step 3c>,
+  "greeks_timeout": 6.0
 }
 ```
 
@@ -63,7 +65,12 @@ Derive:
 - ATM strike — closest to current underlying price
 - Short strike delta confirmation — verify the strikes `get_strategies` will return are near `config.short_delta` (put delta negative, call delta positive)
 - Put/call skew — compare `iv` of the OTM put vs. OTM call at equal distance from ATM; put IV > call IV → `bearish_skew`; call IV > put IV → `bullish_skew`; difference < 0.01 → `neutral`
-- Gamma at the candidate short strikes — high gamma (> 0.06 on a 0DTE) signals accelerating risk if price approaches; weigh this in stop tightening (Step 4d) and force-close (Step 4e)
+- Gamma at the candidate short strikes — high/rising gamma on a threatened short strike argues for tighter stops (Step 4d) or force-close (Step 4e)
+
+**Strike window — read carefully:**
+- The default window is **15 strikes each side of the money**. Always pass `around_price` so the window centers on the real ATM rather than the median strike.
+- If your short strikes or long wings might fall outside a 15-wide window (wide wings, far-OTM shorts, or broader skew scan needed), pass `"strike_count": 25` or larger. **Before acting on the chain, confirm the strikes you intend to trade or manage are actually present in the response.** If a short or long strike is missing, re-request with a larger `strike_count`. Never assume absence means the strike doesn't exist — it may just be outside the window.
+- To retrieve the entire chain (diagnostics only), pass `"strike_count": null`.
 
 **If greeks are unavailable** — check `greeks_complete` (bool) and `greeks_received` (int) in the response:
 - Entry decisions (Steps 5/6): fall back to `get_strategies` delta-target and POP; log the degradation; do not block the iteration

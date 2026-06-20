@@ -8,13 +8,20 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 
+_ENV_VAR_MAP = {
+    "sendgrid_api_key": "MEICAGENT_SENDGRID_KEY",
+}
+
 try:
     import keyring as _keyring
     def _get_secret(name: str) -> str | None:
-        return _keyring.get_password("meicagent", name)
+        value = _keyring.get_password("meicagent", name)
+        if value:
+            return value
+        return os.environ.get(_ENV_VAR_MAP.get(name, ""))
 except ImportError:
     def _get_secret(name: str) -> str | None:
-        return None
+        return os.environ.get(_ENV_VAR_MAP.get(name, ""))
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 _LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
@@ -53,8 +60,9 @@ def _send_email(subject, body):
     api_key = _get_secret("sendgrid_api_key")
     if not api_key:
         raise RuntimeError(
-            "SendGrid API key not found in Windows Credential Manager. "
-            "Run: python -c \"import keyring; keyring.set_password('meicagent', 'sendgrid_api_key', 'YOUR_KEY')\""
+            "SendGrid API key not found. Store it via the OS keyring:\n"
+            "  python -c \"import keyring; keyring.set_password('meicagent', 'sendgrid_api_key', 'YOUR_KEY')\"\n"
+            "Or set the environment variable: MEICAGENT_SENDGRID_KEY=YOUR_KEY"
         )
     payload = json.dumps({
         "personalizations": [{"to": [{"email": cfg_email["to"]}]}],

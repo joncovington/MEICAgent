@@ -64,17 +64,38 @@ Key fields to update in `config.json`:
 
 ### 5. Store your SendGrid API key *(optional)*
 
-Skip this step if you are not using email alerts (`email.enabled: false` in `config.json`). If you do want alerts, the API key is stored in Windows Credential Manager (never in config files or environment variables):
+Skip this step if you are not using email alerts (`email.enabled: false` in `config.json`).
+
+The agent resolves the API key in this order:
+1. **OS keyring** (preferred) — uses your platform's native secret store
+2. **Environment variable** fallback — `MEICAGENT_SENDGRID_KEY`
+
+| Platform | Keyring backend |
+|---|---|
+| Windows | Windows Credential Manager |
+| macOS | Keychain |
+| Linux desktop | Secret Service (gnome-keyring / kwallet) |
+| Linux headless / server | No keyring available — use the env var fallback |
+
+**To store via keyring** (Windows, macOS, Linux desktop):
 
 ```bash
 python -c "import keyring; keyring.set_password('meicagent', 'sendgrid_api_key', 'YOUR_SENDGRID_KEY')"
 ```
 
-To verify it was stored:
+To verify:
 
 ```bash
 python -c "import keyring; print(keyring.get_password('meicagent', 'sendgrid_api_key'))"
 ```
+
+**To use the environment variable instead** (Linux headless, Docker, CI):
+
+```bash
+export MEICAGENT_SENDGRID_KEY=YOUR_SENDGRID_KEY
+```
+
+Add this to your shell profile or container environment so it persists across sessions.
 
 ### 6. Initialize the database
 

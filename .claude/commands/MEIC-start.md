@@ -16,17 +16,13 @@ Check if dashboard is already running:
 python -c "import socket; s=socket.socket(); r=s.connect_ex(('127.0.0.1',5050)); s.close(); print('running' if r==0 else 'not_running')"
 ```
 
-If `not_running`: launch dashboard as a hidden background process, then open the browser.
+If `not_running`: launch dashboard as a hidden background process. `dashboard.py` opens the browser automatically on startup — do not open it again.
 
 ```bash
 Start-Process python -ArgumentList 'dashboard.py' -WorkingDirectory $PWD -WindowStyle Hidden
 ```
 
-```bash
-start http://localhost:5050
-```
-
-If `running`: just open the browser.
+If `running`: open the browser.
 
 ```bash
 start http://localhost:5050

@@ -7,7 +7,11 @@
       "Bash(python -c *)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "PowerShell(python db.py *)",
+      "PowerShell(python notify.py *)",
+      "PowerShell(python -c *)",
+      "PowerShell(python *.py)"
     ]
   },
   "mcpServers": {

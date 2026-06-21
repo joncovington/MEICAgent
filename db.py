@@ -351,11 +351,24 @@ def cmd_log_loop_action(args):
     now_str = str(now_et)
     today = now_et.strftime("%Y-%m-%d")
     ctx = {}
-    if args.market_context:
+    if args.market_context and args.market_context != "{}":
         try:
             ctx = json.loads(args.market_context)
         except json.JSONDecodeError:
             pass
+    # Flat args override JSON context when provided
+    if args.iv_rank is not None:
+        ctx["iv_rank"] = args.iv_rank
+    if args.session_quality is not None:
+        ctx["session_quality"] = args.session_quality
+    if args.underlying_price is not None:
+        ctx["underlying_price"] = args.underlying_price
+    if args.open_trades is not None:
+        ctx["open_trades"] = args.open_trades
+    if args.today_count is not None:
+        ctx["today_count"] = args.today_count
+    if args.today_pnl is not None:
+        ctx["today_pnl"] = args.today_pnl
     conn = _connect()
     conn.execute(
         """INSERT INTO loop_log
@@ -445,6 +458,12 @@ def main():
     p_log.add_argument("--action", required=True)
     p_log.add_argument("--reasoning", default="")
     p_log.add_argument("--market_context", default="{}")
+    p_log.add_argument("--iv_rank", default=None, type=float)
+    p_log.add_argument("--session_quality", default=None)
+    p_log.add_argument("--underlying_price", default=None, type=float)
+    p_log.add_argument("--open_trades", default=None, type=int)
+    p_log.add_argument("--today_count", default=None, type=int)
+    p_log.add_argument("--today_pnl", default=None, type=float)
 
     args = parser.parse_args()
 

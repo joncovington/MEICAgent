@@ -11,7 +11,19 @@
       "PowerShell(python db.py *)",
       "PowerShell(python notify.py *)",
       "PowerShell(python -c *)",
-      "PowerShell(python *.py)"
+      "PowerShell(python *.py)",
+      "PowerShell(Start-Process python *)",
+      "Skill(fewer-permission-prompts)",
+      "Skill(fewer-permission-prompts:*)",
+      "mcp__tastytrade__get_connection_status",
+      "mcp__tastytrade__get_account_info",
+      "mcp__tastytrade__get_market_overview",
+      "mcp__tastytrade__get_option_chain",
+      "mcp__tastytrade__get_strategies",
+      "mcp__tastytrade__get_positions",
+      "mcp__tastytrade__get_working_orders",
+      "mcp__tastytrade__list_accounts",
+      "mcp__tastytrade__get_watchlists"
     ]
   },
   "mcpServers": {

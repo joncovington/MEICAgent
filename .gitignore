@@ -19,6 +19,7 @@ __pycache__/
 
 # VS Code workspace (IDE-specific, not project config)
 .vscode/
+*.code-workspace
 
 # Local MCP config (machine-specific paths)
 .mcp.json

@@ -318,6 +318,7 @@ python db.py update_trade --ic_order_id=<X> --exit_analysis='<updated json>'
 
 **Hard stops — never enter if:**
 - `max_entries_per_day != -1` AND `today_count >= max_entries_per_day`
+- Current time < `entry_window_start` (09:45) — avoid open-bell volatility
 - Current time > `entry_window_end` (15:30)
 - Buying power is insufficient
 - `net_credit < config.min_credit` (premium too thin to justify the risk and fees)

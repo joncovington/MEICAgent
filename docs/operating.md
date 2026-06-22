@@ -8,7 +8,7 @@ Run `/MEIC-start` before 9:30 ET — it launches the watchdog, dashboard, and ag
 /MEIC-start
 ```
 
-This opens two named terminal windows (watchdog + dashboard), opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not trade before 9:30 ET or after 15:55 ET, so starting early is safe.
+This opens two named terminal windows (watchdog + dashboard), opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not trade before 9:45 ET or after 15:30 ET, so starting early is safe.
 
 To start components individually instead:
 
@@ -103,8 +103,11 @@ You can also trigger it manually at any time:
 
 All loop actions are written to `logs/agent.log` as newline-delimited JSON. Each entry includes a timestamp, level (`INFO` or `WARN`), message, and optional structured data. Review `WARN` entries after EOD to identify conflict patterns and refine agent behavior.
 
+The easiest way to watch the log live is the **Logs tab** in the dashboard (`http://localhost:5050`) — it tails the last 200 lines, color-codes WARN/ERROR entries, and auto-refreshes every 10 seconds.
+
+To tail from the terminal instead:
+
 ```bash
-# tail the live log during a session
 Get-Content logs/agent.log -Wait -Tail 20   # PowerShell
 tail -f logs/agent.log                       # bash
 ```

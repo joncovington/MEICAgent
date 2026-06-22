@@ -32,7 +32,7 @@ Any width where `width × 100 > available buying power` is eliminated before com
 
 | Window | Label | Notes |
 |---|---|---|
-| 09:30–10:00 | `open_volatile` | Elevated volatility; weigh IV rank and skew carefully |
+| 09:30–10:00 | `open_volatile` | Elevated volatility; entries blocked until 09:45 (`entry_window_start`), then weigh IV rank and skew carefully |
 | 10:00–11:30 | `prime` | Preferred entry window |
 | 11:30–13:00 | `midday` | Generally good conditions |
 | 13:00–14:30 | `afternoon` | Less time remaining; weigh credit vs. time risk |

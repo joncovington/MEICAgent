@@ -4,6 +4,8 @@ An AI-driven Multiple Entry Iron Condor (MEIC) strategy trading agent for 0DTE o
 
 The agent runs as a Claude Code `/loop` — on each iteration (~every 5 minutes during market hours) it reads persisted state, assesses market conditions, makes AI-driven entry and stop decisions, executes trades, and logs a plain English account of everything it did and why.
 
+Supports **equity index options** (XSP, SPX, NDX, RUT) and **CME futures options** (/MES, /ES, /MNQ, /NQ). All contract-specific parameters (`instrument_type`, `dollar_multiplier`, leg symbols) are read directly from the `get_strategies` response — no hardcoding required when switching underlyings.
+
 Supports **paper trading mode** (`paper_trade_mode: true` in `config.json`) — runs the full strategy loop with simulated fills and stop checks against live option chain prices, with no real orders sent to the broker.
 
 ---

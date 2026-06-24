@@ -24,7 +24,7 @@ The agent evaluates all widths in `wing_width_candidates` on each entry and pick
 - **Skewed market** — adjust width by side based on put/call IV skew
 - **Elevated short-strike gamma** (above 0.07) — prefer narrower wings
 
-Any width where `width × 100 > available buying power` is eliminated before comparison.
+Any width where `width × dollar_multiplier > available buying power` is eliminated before comparison. `dollar_multiplier` is returned by `get_strategies` and reflects the contract's point value (100 for equity options; 5 for /MES, 50 for /ES, 2 for /MNQ, 20 for /NQ).
 
 ---
 
@@ -85,7 +85,27 @@ After 15:00 ET, the agent reviews each open spread for unacceptable gamma risk a
 
 **Cash-settled symbols** (SPX, XSP, NDX, RUT) — remaining open positions can be left to expire; cash settlement delivers intrinsic value automatically with no assignment risk.
 
-**Non-cash-settled symbols** — all remaining open legs are closed before 15:45 ET.
+**Non-cash-settled symbols** (including futures options: /MES, /ES, /NQ, /MNQ) — all remaining open legs are closed before 15:45 ET.
+
+---
+
+## Futures options support
+
+The agent supports futures options on CME equity index contracts:
+
+| Symbol | Product | `dollar_multiplier` | Strike interval |
+|---|---|---|---|
+| /MES | Micro E-mini S&P 500 | $5/pt | 5 pts |
+| /ES | E-mini S&P 500 | $50/pt | 5 pts |
+| /MNQ | Micro E-mini NASDAQ-100 | $2/pt | 10 pts |
+| /NQ | E-mini NASDAQ-100 | $20/pt | 10 pts |
+
+When `config.symbol` starts with `/`, the agent calls `get_quote` (not `get_market_overview`) to obtain the underlying price. IV rank is unavailable for futures — the agent treats it as neutral (0.5) and relies on premium quality and delta targeting. All four legs carry `instrument_type: "Future Option"` from the `get_strategies` response; stop orders use the same `instrument_type` so no hardcoding is needed.
+
+`dollar_multiplier` is returned by `get_strategies` and is used for:
+- **Buying power check**: `wing_width × dollar_multiplier` = max loss per spread
+- **Position sizing**: `net_credit_per_contract` is already in dollars (no manual scaling needed)
+- **P&L accounting**: the DB stores `dollar_multiplier` per trade for correct unrealized/realized P&L math
 
 ---
 

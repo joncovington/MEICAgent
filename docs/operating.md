@@ -8,7 +8,7 @@ Run `/meic-start` before 9:30 ET — it launches the watchdog, dashboard, and ag
 /meic-start
 ```
 
-This launches the watchdog and dashboard as background processes, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 10:00 ET) or after 15:30 ET, so starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** (Step 2.5) to verify the tastytrade MCP is live before any market assessment begins.
+This launches the watchdog and dashboard as background processes, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 09:45 ET) or after 15:30 ET, so starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** (Step 2.5) to verify the tastytrade MCP is live before any market assessment begins.
 
 To start components individually instead:
 
@@ -37,7 +37,7 @@ Open the MEICAgent folder in VS Code with the Claude Code extension (or run `cla
 /loop
 ```
 
-The agent runs every ~5 minutes. The tastytrade MCP gates all market-hours checks, so starting early or leaving it running after close is safe — it will not attempt to trade outside market hours. New entries are additionally blocked before `entry_window_start` (default 10:00 ET) to avoid open-bell volatility.
+The agent runs every ~5 minutes. The tastytrade MCP gates all market-hours checks, so starting early or leaving it running after close is safe — it will not attempt to trade outside market hours. New entries are additionally blocked before `entry_window_start` (default 09:45 ET) to avoid open-bell volatility.
 
 ---
 

@@ -116,25 +116,29 @@ def check_stops(trade: dict, put_spread_value: Optional[float], call_spread_valu
     return result
 
 
-def ic_pnl(net_credit: float, put_exit_cost: float, call_exit_cost: float, quantity: int = 1) -> float:
+def ic_pnl(net_credit: float, put_exit_cost: float, call_exit_cost: float,
+           quantity: int = 1, dollar_multiplier: float = 100) -> float:
     """
     Realized P&L in dollars for a fully closed paper IC.
 
-    pnl = (credit_collected - put_exit_cost - call_exit_cost) * 100 * quantity
+    pnl = (credit_collected - put_exit_cost - call_exit_cost) * dollar_multiplier * quantity
     For expired spreads, pass exit_cost=0.
+    dollar_multiplier: 100 for equity options; futures point value (e.g. 50 for /ES).
     """
-    return round((net_credit - put_exit_cost - call_exit_cost) * 100 * quantity, 2)
+    return round((net_credit - put_exit_cost - call_exit_cost) * dollar_multiplier * quantity, 2)
 
 
 def unrealized_pnl(net_credit: float, put_spread_value: Optional[float],
-                   call_spread_value: Optional[float], quantity: int = 1) -> Optional[float]:
+                   call_spread_value: Optional[float], quantity: int = 1,
+                   dollar_multiplier: float = 100) -> Optional[float]:
     """
     Mark-to-market unrealized P&L in dollars for an open paper IC.
 
-    pnl = (credit_collected - current_spread_values) * 100 * quantity
+    pnl = (credit_collected - current_spread_values) * dollar_multiplier * quantity
     Returns None if either spread value is unavailable.
+    dollar_multiplier: 100 for equity options; futures point value (e.g. 50 for /ES).
     """
     if put_spread_value is None or call_spread_value is None:
         return None
     total_spread = put_spread_value + call_spread_value
-    return round((net_credit - total_spread) * 100 * quantity, 2)
+    return round((net_credit - total_spread) * dollar_multiplier * quantity, 2)

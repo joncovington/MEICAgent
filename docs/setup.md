@@ -46,12 +46,13 @@ Key fields to update in `config.json`:
 
 | Field | Description |
 |---|---|
-| `symbol` | Underlying to trade (e.g. `SPX`, `XSP`, `NDX`) |
+| `symbol` | Underlying to trade. Equity: `XSP`, `SPX`, `NDX`, `RUT`. Futures: `/MES`, `/ES`, `/MNQ`, `/NQ` |
 | `delta_target` | Short strike delta target (default `0.15`) |
-| `wing_width_candidates` | Wing widths to evaluate per entry (agent picks the best) |
+| `wing_width_candidates` | Wing widths to evaluate per entry (agent picks the best fit) |
 | `quantity` | Number of contracts per IC leg |
 | `max_entries_per_day` | Hard cap on entries (`-1` = no cap, rely on AI + buying power) |
-| `entry_window_start` | Earliest time to enter new ICs in HH:MM ET (default `"10:00"`) |
+| `entry_window_start` | Earliest time to enter new ICs in HH:MM ET (default `"09:45"`) |
+| `separate_spread_entry` | Order structure: `false` = 4-leg combo (default), `true` = separate 2-leg spreads, `"auto"` = agent decides per-iteration based on IV rank, session, and open IC count |
 | `paper_trade_mode` | `true` to run full strategy with simulated fills — no real orders sent |
 | `email.enabled` | `true` to send alerts via SendGrid (optional — logs are always written to `logs/agent.log` regardless) |
 | `email.from` | Verified SendGrid sender address |

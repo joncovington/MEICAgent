@@ -109,7 +109,7 @@ After the connection check passes, issue the following four calls **in parallel*
 
 ### 3b. Account info
 Extract from `get_account_info`:
-- `derivative_buying_power` — factor into entry decision; minimum required is `chosen_wing_width × 100` per IC (max spread loss on the wider spread), plus a buffer you judge appropriate. Wing width is chosen in Step 3f — eliminate candidate widths that exceed available buying power before comparing them.
+- `derivative_buying_power` — factor into entry decision; minimum required is `chosen_wing_width × dollar_multiplier` per IC (max spread loss on the wider spread), plus a buffer you judge appropriate. `dollar_multiplier` comes from the `get_strategies` response (100 for equity, 50 for /ES, 5 for /MES, etc.). Wing width is chosen in Step 3f — eliminate candidate widths that exceed available buying power before comparing them.
 - `net_liquidating_value` — compare to yesterday's `closing_nlv`:
   ```bash
   python -c "
@@ -131,6 +131,14 @@ Extract from `get_market_overview`:
 - `last` — underlying last trade price (float); streamed from DXLink in parallel with the metrics fetch. Use this as `around_price` in `get_strategies` and `get_option_chain`. If absent (feed timeout), fall back to the ATM strike from Step 3d's chain.
 
 A retryable error on `get_market_overview` aborts the iteration — IV rank is required for live trading decisions.
+
+**Futures underlyings** (`config.symbol` starts with `/`): `get_market_overview` calls an equities-only metrics API that does not support futures — omit it from the parallel batch. Instead, call `get_quote` in this step to get the underlying last price:
+
+```json
+get_quote({ "symbol": "<config.symbol>" })
+```
+
+`get_quote` automatically resolves the futures root (e.g. `/ES`) to the active front-month contract, subscribes to DXLink Trade events, and returns `last`. Use `last` as `around_price` throughout. If `last` is null (DXLink timeout), fall back to the ATM strike from Step 3d's chain. IV rank is unavailable for futures — treat it as neutral (`0.5`) and rely on premium quality and delta targeting.
 
 ### 3d. Option chain
 
@@ -184,7 +192,7 @@ python notify.py log_event --level=WARN \
 ```
 
 ### 3f. Strategy candidates — wing width selection
-Call `get_strategies` in parallel for each width in `config.wing_width_candidates`, using the same `symbol`, `target_dte: 0`, `short_delta: config.delta_target`, and **`around_price: <underlying last price from Step 3c>`** each time. Passing `around_price` is required — it centers the live-greeks window used for delta-based strike selection. Filter out any width where `width × 100 > available_buying_power_with_buffer`. From the remaining candidates, choose the width that best fits current conditions:
+Call `get_strategies` in parallel for each width in `config.wing_width_candidates`, using the same `symbol`, `target_dte: 0`, `short_delta: config.delta_target`, and **`around_price: <underlying last price from Step 3c>`** each time. Passing `around_price` is required — it centers the live-greeks window used for delta-based strike selection. Filter out any width where `width × dollar_multiplier > available_buying_power_with_buffer` (use `dollar_multiplier` from the `get_strategies` response for that width; it will be 100 for equity, 50 for /ES, etc.). From the remaining candidates, choose the width that best fits current conditions:
 
 - **Earlier in the session** (prime/midday): favor wider wings — more credit collected per entry, more room for the underlying to move
 - **Later in the session** (afternoon/late) or when multiple ICs are already open: favor narrower wings — lower max loss per spread limits tail risk as gamma accelerates
@@ -194,8 +202,10 @@ Call `get_strategies` in parallel for each width in `config.wing_width_candidate
 - **Elevated gamma at candidate short strikes**: if short-strike gamma from Step 3d is above 0.07, favor narrower wings — accelerating gamma means spread value can move sharply, and a narrower wing caps max loss
 
 From the `get_strategies` response, extract for the chosen width:
-- `net_credit` — per-share credit (e.g. `1.20`); comes directly from the response
-- `net_credit_per_contract` — dollar value per contract (e.g. `120.0`)
+- `net_credit` — credit per unit (per share for equity, per point for futures, e.g. `1.20`); comes directly from the response
+- `net_credit_per_contract` — dollar value per contract (e.g. `120.0` for equity, `60.0` for /ES at $50/point). Always in dollars — no manual scaling required.
+- `dollar_multiplier` — the $/point multiplier used (100 for equity; 50 for /ES, 5 for /MES, 20 for /NQ, etc.). Use this for position-sizing math: max loss per spread = `wing_width × dollar_multiplier`.
+- `contract_multiplier` — option-to-futures ratio (1 for futures, 100 for equity). Informational only; `net_credit_per_contract` already accounts for this.
 - `quotes_complete` — `true` if all four legs received live quotes; `false` if the DXLink feed was temporarily unavailable
 - `greeks_used_for_strike_selection` — `true` if live greeks drove strike selection; `false` means the tool fell back to a positional heuristic and the returned strikes may not match `config.delta_target`
 
@@ -457,7 +467,7 @@ Log the mode chosen and the deciding condition in `ai_entry_reasoning`.
 
 5. Save to DB (status=`pending`):
    ```bash
-   python db.py save_trade --data='{"ic_order_id":"<broker_order_id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
+   python db.py save_trade --data='{"ic_order_id":"<broker_order_id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"dollar_multiplier":<dollar_multiplier>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
    ```
 
 6. Send entry alert:
@@ -502,7 +512,7 @@ If ok → submit live, record `call_spread_entry_order_id`.
 
 Save to DB (status=`pending`):
 ```bash
-python db.py save_trade --data='{"ic_order_id":"<group_id>","symbol":"XSP","status":"pending","put_spread_entry_order_id":"<>","call_spread_entry_order_id":"<>","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
+python db.py save_trade --data='{"ic_order_id":"<group_id>","symbol":"XSP","status":"pending","put_spread_entry_order_id":"<>","call_spread_entry_order_id":"<>","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"dollar_multiplier":<dollar_multiplier>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
 ```
 
 Send entry alert:
@@ -680,7 +690,7 @@ At 15:55 ET, for each open paper trade, fetch the current option chain and compu
 put_val  = spread_mid_from_chain(trade["put_symbol"],  trade["long_put_symbol"],  chain_by_symbol)
 call_val = spread_mid_from_chain(trade["call_symbol"], trade["long_call_symbol"], chain_by_symbol)
 exit_cost = (put_val or 0) + (call_val or 0)
-pnl = round((trade["net_credit"] - exit_cost) * 100 * trade["quantity"], 2)
+pnl = round((trade["net_credit"] - exit_cost) * (trade.get("dollar_multiplier") or 100) * trade["quantity"], 2)
 ```
 
 Update status to `expired`, record `pnl` and `exit_reason=expired_eod`.
@@ -712,13 +722,21 @@ Then immediately store stop trigger/limit levels (Step 4c pattern above).
 
 **Step 7 — Paper mark (append after each iteration)**
 
-For each open paper trade, save a mark after the chain data is available:
+For each open paper trade, compute unrealized P&L then save the mark:
+```python
+from paper_trading import spread_mid_from_chain, unrealized_pnl
+put_val  = spread_mid_from_chain(trade["put_symbol"],  trade["long_put_symbol"],  chain_by_symbol)
+call_val = spread_mid_from_chain(trade["call_symbol"], trade["long_call_symbol"], chain_by_symbol)
+upnl = unrealized_pnl(trade["net_credit"], put_val, call_val,
+                      quantity=trade["quantity"],
+                      dollar_multiplier=trade.get("dollar_multiplier") or 100)
+```
 ```bash
 python db.py save_paper_mark \
   --ic_order_id=<X> \
-  --put_spread_value=<Y> \
-  --call_spread_value=<Z> \
-  --unrealized_pnl=<P>
+  --put_spread_value=<put_val> \
+  --call_spread_value=<call_val> \
+  --unrealized_pnl=<upnl>
 ```
 
 ### Exclusivity
@@ -734,7 +752,8 @@ All tools below refer to the **`tastytrade`** server. Never call any other MCP s
 | Tool | Purpose | Always available? |
 |---|---|---|
 | `get_connection_status` | Verify MCP is connected to tastytrade | Yes |
-| `get_market_overview` | IV rank, underlying price, market summary | Yes |
+| `get_market_overview` | IV rank, underlying price, market summary (equities only) | Yes |
+| `get_quote` | Current last trade price for any symbol, incl. futures roots | Yes |
 | `get_option_chain` | All strikes and greeks for a symbol | Yes |
 | `get_strategies` | Pre-built IC candidate with POP estimate | Yes |
 | `get_account_info` | Buying power, NLV, positions summary | Yes |

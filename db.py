@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     call_stop_cost            REAL,
     pnl                       REAL,
     fees                      REAL,
+    dollar_multiplier         REAL DEFAULT 100,
     fill_confirmed_at         TEXT,
     created_at                TEXT NOT NULL,
     updated_at                TEXT NOT NULL
@@ -166,6 +167,7 @@ def cmd_init_db(_args):
         ("call_spread_entry_order_id", "TEXT"),
         ("is_paper",                "INTEGER DEFAULT 0"),
         ("paper_entry_slippage",    "REAL"),
+        ("dollar_multiplier",       "REAL DEFAULT 100"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE ic_trades ADD COLUMN {col} {col_type}")

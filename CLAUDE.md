@@ -10,14 +10,15 @@ You are an AI trading agent executing a Multiple Entry Iron Condor (MEIC) strate
 
 ## STEP 1: Load State
 
-Run all three in parallel:
+Run all four in parallel — DB queries and time check have no dependencies on each other:
 ```bash
 python db.py get_open_trades
 python db.py get_today_count
 python db.py get_today_pnl
+python -c "import pytz, datetime; et=pytz.timezone('America/New_York'); now=datetime.datetime.now(et); print(now.strftime('%Y-%m-%d %H:%M:%S %Z'))"
 ```
 
-Record: `open_trades` list, `today_count` (N), `today_pnl` (dollar amount).
+Record: `open_trades` list, `today_count` (N), `today_pnl` (dollar amount), and current ET time.
 
 If `max_entries_per_day != -1` AND `today_count >= max_entries_per_day` → **skip Step 5 (no new entries)**. Continue to Step 4 (stop management).
 
@@ -25,12 +26,7 @@ If `max_entries_per_day != -1` AND `today_count >= max_entries_per_day` → **sk
 
 ## STEP 2: Time Gate
 
-Get current Eastern Time:
-```bash
-python -c "import pytz, datetime; et=pytz.timezone('America/New_York'); now=datetime.datetime.now(et); print(now.strftime('%Y-%m-%d %H:%M:%S %Z'))"
-```
-
-Read `config.json` for `nyse_holidays_<year>` (key is year-specific, e.g. `nyse_holidays_2026`).
+Use the ET time recorded in Step 1. Read `config.json` for `nyse_holidays_<year>` (key is year-specific, e.g. `nyse_holidays_2026`).
 
 **Stop the iteration — skip directly to Step 7 with `action=time_gate_stop` — if any condition is true:**
 - Current ET time is before 09:30 (pre-market)
@@ -103,7 +99,7 @@ Call `get_connection_status`. If `ok != true` → log error, stop iteration.
 ### 3b–3c + working orders + positions (parallel batch)
 After the connection check passes, issue the following four calls **in parallel** — they have no dependencies on each other:
 - `get_account_info` (→ 3b below)
-- `get_market_overview` with `symbols: [config.symbol]` (→ 3c below)
+- `get_market_overview` with `symbols: [config.symbol]` (→ 3c below; **for futures: replace with `get_quote`**)
 - `get_working_orders` (→ used in Step 4 stop management; fetch here to avoid a separate round-trip)
 - `get_positions` (→ used in 3e broker reconciliation below)
 
@@ -512,12 +508,12 @@ If ok → submit live, record `call_spread_entry_order_id`.
 
 Save to DB (status=`pending`):
 ```bash
-python db.py save_trade --data='{"ic_order_id":"<group_id>","symbol":"XSP","status":"pending","put_spread_entry_order_id":"<>","call_spread_entry_order_id":"<>","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"dollar_multiplier":<dollar_multiplier>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
+python db.py save_trade --data='{"ic_order_id":"<group_id>","symbol":"XSP","status":"pending","put_spread_entry_order_id":"<put_order_id>","call_spread_entry_order_id":"<call_order_id>","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"dollar_multiplier":<dollar_multiplier>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
 ```
 
 Send entry alert:
 ```bash
-python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC (separate spreads) at $<credit> credit | <session> | <iv_skew_signal> | strikes <put>/<call>"
+python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC (separate spreads) at \$<credit> credit | <session> | <iv_skew_signal> | strikes <put>/<call>"
 ```
 
 ---
@@ -585,8 +581,8 @@ After completing Step 7, schedule the next wakeup using these intervals:
 
 | Condition | Interval |
 |---|---|
-| Weekend or NYSE holiday (`time_gate_stop` due to day-of-week/holiday) | **1800s** |
-| Pre-market before 09:00 ET (> 30 min until open) | **900s** |
+| No market action expected within 90 min (weekend, holiday, or before 08:00 ET) | **1800s** |
+| Pre-market 08:00–09:00 ET | **900s** |
 | Pre-market 09:00–09:29 ET (approaching open) | **120s** |
 | Market hours with no open positions | **300s** |
 | Market hours with one or more open positions | **120s** |

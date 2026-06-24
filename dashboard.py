@@ -80,6 +80,7 @@ def _today_stats(conn: sqlite3.Connection, today: str) -> dict:
                SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses
         FROM ic_trades
         WHERE trade_date = ?
+          AND (is_paper = 0 OR is_paper IS NULL)
           AND status NOT IN ('cancelled', 'pending', 'partial_entry')
     """, (today,)) or {}
     result = {
@@ -211,6 +212,92 @@ def _build_log_data(n: int = 200) -> dict:
         return {"ok": False, "error": str(exc), "lines": []}
 
 
+# ── Paper data builder ────────────────────────────────────────────────────────
+
+def _build_paper_data() -> dict:
+    if not os.path.exists(_DB_PATH):
+        return {"ok": False, "error": "Database not found"}
+
+    conn = _connect()
+    today = _today()
+
+    def _paper_stats(conn, start, end) -> dict:
+        r = _one(conn, """
+            SELECT COALESCE(SUM(pnl), 0)                                    AS net_pnl,
+                   COUNT(*)                                                  AS total_trades,
+                   SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)                AS wins,
+                   SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses
+            FROM ic_trades
+            WHERE is_paper = 1
+              AND trade_date >= ? AND trade_date <= ?
+              AND status NOT IN ('cancelled', 'pending', 'partial_entry')
+        """, (start, end)) or {}
+        result = {
+            "net_pnl":      round(float(r.get("net_pnl") or 0), 2),
+            "total_trades": int(r.get("total_trades") or 0),
+            "wins":         int(r.get("wins") or 0),
+            "losses":       int(r.get("losses") or 0),
+        }
+        result["wl_ratio"] = _wl_ratio(result["wins"], result["losses"])
+        return result
+
+    today_stats = _paper_stats(conn, today, today)
+
+    alltime = _one(conn, """
+        SELECT COALESCE(SUM(pnl), 0)   AS net_pnl,
+               COUNT(*)                AS total_trades,
+               SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses
+        FROM ic_trades WHERE is_paper = 1
+          AND status NOT IN ('cancelled', 'pending', 'partial_entry')
+    """) or {}
+    alltime_stats = {
+        "net_pnl":      round(float(alltime.get("net_pnl") or 0), 2),
+        "total_trades": int(alltime.get("total_trades") or 0),
+        "wins":         int(alltime.get("wins") or 0),
+        "losses":       int(alltime.get("losses") or 0),
+    }
+    alltime_stats["wl_ratio"] = _wl_ratio(alltime_stats["wins"], alltime_stats["losses"])
+
+    raw_trades = _rows(conn, """
+        SELECT ic_order_id, entry_time, fill_confirmed_at,
+               put_strike, call_strike, wing_width, net_credit, quantity,
+               paper_entry_slippage, status, session_quality,
+               iv_rank_at_entry, iv_skew_signal, price_action_signal,
+               stop_trigger_current, stop_limit_current,
+               exit_time, exit_price, exit_reason, pnl,
+               ai_entry_reasoning, exit_analysis
+        FROM ic_trades
+        WHERE is_paper = 1 AND trade_date = ?
+        ORDER BY entry_time
+    """, (today,))
+
+    trades = []
+    for t in raw_trades:
+        put_s, call_s = _spread_statuses(t)
+        row = {k: v for k, v in t.items() if k != "exit_analysis"}
+        row["put_status"]  = put_s
+        row["call_status"] = call_s
+        trades.append(row)
+
+    marks = _rows(conn, """
+        SELECT mark_time, SUM(unrealized_pnl) AS total_unrealized
+        FROM paper_marks
+        WHERE mark_date = ?
+        GROUP BY mark_time
+        ORDER BY mark_time ASC
+    """, (today,))
+
+    conn.close()
+    return {
+        "ok": True,
+        "today": today,
+        "stats": {"today": today_stats, "all_time": alltime_stats},
+        "paper_trades": trades,
+        "mark_series": marks,
+    }
+
+
 # ── API data builder ──────────────────────────────────────────────────────────
 
 def _build_api_data() -> dict:
@@ -239,6 +326,7 @@ def _build_api_data() -> dict:
                ai_entry_reasoning, exit_analysis
         FROM ic_trades
         WHERE trade_date = ?
+          AND (is_paper = 0 OR is_paper IS NULL)
         ORDER BY entry_time
     """, (today,))
 
@@ -271,7 +359,8 @@ def _build_api_data() -> dict:
                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
                ROUND(AVG(pnl), 2) AS avg_pnl
         FROM ic_trades
-        WHERE status NOT IN ('cancelled','pending','partial_entry')
+        WHERE (is_paper = 0 OR is_paper IS NULL)
+          AND status NOT IN ('cancelled','pending','partial_entry')
           AND session_quality IS NOT NULL
         GROUP BY session_quality
         ORDER BY total DESC
@@ -280,7 +369,8 @@ def _build_api_data() -> dict:
     by_exit = _rows(conn, """
         SELECT COALESCE(exit_reason, 'open') AS exit_reason, COUNT(*) AS count
         FROM ic_trades
-        WHERE status NOT IN ('cancelled','pending','partial_entry')
+        WHERE (is_paper = 0 OR is_paper IS NULL)
+          AND status NOT IN ('cancelled','pending','partial_entry')
         GROUP BY exit_reason
         ORDER BY count DESC
     """)
@@ -297,7 +387,8 @@ def _build_api_data() -> dict:
             ROUND(AVG(pnl), 2) AS avg_pnl,
             SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins
         FROM ic_trades
-        WHERE pnl IS NOT NULL AND iv_rank_at_entry IS NOT NULL
+        WHERE (is_paper = 0 OR is_paper IS NULL)
+          AND pnl IS NOT NULL AND iv_rank_at_entry IS NOT NULL
           AND status NOT IN ('cancelled','pending','partial_entry')
         GROUP BY iv_bucket
         ORDER BY MIN(iv_rank_at_entry)
@@ -308,7 +399,8 @@ def _build_api_data() -> dict:
                COALESCE(SUM(fees), 0)                  AS total_fees,
                COALESCE(SUM(pnl), 0)                   AS net_pnl
         FROM ic_trades
-        WHERE status NOT IN ('cancelled','pending','partial_entry')
+        WHERE (is_paper = 0 OR is_paper IS NULL)
+          AND status NOT IN ('cancelled','pending','partial_entry')
     """) or {}
     gross = float(fee_row.get("gross_credit") or 0)
     fees  = float(fee_row.get("total_fees") or 0)
@@ -490,6 +582,9 @@ nav{flex:1;padding:10px 0}
     <div class="nav-item" data-view="history">
       <span class="nav-icon">&#9711;</span> History
     </div>
+    <div class="nav-item" data-view="paper">
+      <span class="nav-icon">&#9632;</span> Paper
+    </div>
     <div class="nav-item" data-view="logs">
       <span class="nav-icon">&#9776;</span> Logs
     </div>
@@ -634,6 +729,86 @@ nav{flex:1;padding:10px 0}
             <div class="fee-card"><div class="fee-lbl">Fee Drag</div><div class="fee-val warn" id="f-drag">&mdash;</div></div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PAPER VIEW -->
+  <div class="view" id="view-paper">
+    <div class="frame" style="flex:0 0 auto">
+      <div class="frame-hdr">
+        <span class="frame-title">Paper P&amp;L</span>
+        <span class="frame-sub" id="paper-mode-badge"></span>
+      </div>
+      <div class="stats-wrap">
+        <table class="sgrid">
+          <thead>
+            <tr>
+              <th class="lbl" style="padding-left:0"></th>
+              <th class="today-col">TODAY</th>
+              <th>ALL-TIME</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="lbl">Net P&amp;L</td>
+              <td class="today-col" id="pp-pnl-today"></td>
+              <td id="pp-pnl-all"></td>
+            </tr>
+            <tr>
+              <td class="lbl">Total Trades</td>
+              <td class="today-col" id="pp-tr-today"></td>
+              <td id="pp-tr-all"></td>
+            </tr>
+            <tr>
+              <td class="lbl">Wins</td>
+              <td class="today-col" id="pp-w-today"></td>
+              <td id="pp-w-all"></td>
+            </tr>
+            <tr>
+              <td class="lbl">Losses</td>
+              <td class="today-col" id="pp-l-today"></td>
+              <td id="pp-l-all"></td>
+            </tr>
+            <tr>
+              <td class="lbl">W/L Ratio</td>
+              <td class="today-col" id="pp-wl-today"></td>
+              <td id="pp-wl-all"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="frame" style="flex:0 0 160px">
+      <div class="frame-hdr" style="padding-bottom:4px">
+        <span class="frame-title">Intraday Mark-to-Market</span>
+      </div>
+      <div class="chart-wrap" style="padding:8px 18px">
+        <canvas id="paper-canvas"></canvas>
+        <div class="empty" id="paper-chart-empty" style="display:none;padding:12px 0">
+          No marks yet &mdash; open paper trades appear here once marked.
+        </div>
+      </div>
+    </div>
+    <div class="frame" style="flex:1;min-height:0">
+      <div class="frame-hdr" style="padding-bottom:7px">
+        <span class="frame-title">Today&rsquo;s Paper Trades</span>
+        <span class="frame-sub" id="paper-trade-count"></span>
+      </div>
+      <div class="tbl-wrap" style="height:calc(100% - 34px)">
+        <table class="ttbl">
+          <thead>
+            <tr>
+              <th>TIME</th><th>WIDTH</th><th>PUT STRIKE</th><th>CALL STRIKE</th>
+              <th>CREDIT (ADJ)</th><th>SLIPPAGE</th>
+              <th>PUT STATUS</th><th>CALL STATUS</th>
+              <th style="text-align:right">P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody id="paper-tbody">
+            <tr><td colspan="9" class="empty">Loading&hellip;</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -950,12 +1125,128 @@ async function fetchLog() {
   document.getElementById(id).addEventListener('change', () => { lastLogCount = -1; fetchLog(); });
 });
 
+// ── paper tab ─────────────────────────────────────────────────────────────────
+let paperChart = null;
+let paperCache = null;
+
+function paperVisible() {
+  return document.getElementById('view-paper').classList.contains('active');
+}
+
+function renderPaperStats(s) {
+  const today = s.today || {};
+  const all   = s.all_time || {};
+  document.getElementById('pp-pnl-today').innerHTML = fPnl(today.net_pnl);
+  document.getElementById('pp-pnl-all').innerHTML   = fPnl(all.net_pnl);
+  document.getElementById('pp-tr-today').innerHTML  = fNum(today.total_trades);
+  document.getElementById('pp-tr-all').innerHTML    = fNum(all.total_trades);
+  document.getElementById('pp-w-today').innerHTML   = today.wins  != null ? '<span class="pos">' + today.wins  + '</span>' : '<span class="dash">—</span>';
+  document.getElementById('pp-w-all').innerHTML     = all.wins    != null ? '<span class="pos">' + all.wins    + '</span>' : '<span class="dash">—</span>';
+  document.getElementById('pp-l-today').innerHTML   = today.losses != null ? '<span class="neg">' + today.losses + '</span>' : '<span class="dash">—</span>';
+  document.getElementById('pp-l-all').innerHTML     = all.losses   != null ? '<span class="neg">' + all.losses   + '</span>' : '<span class="dash">—</span>';
+  document.getElementById('pp-wl-today').innerHTML  = fWl(today.wl_ratio);
+  document.getElementById('pp-wl-all').innerHTML    = fWl(all.wl_ratio);
+}
+
+function renderPaperTrades(trades) {
+  const tbody = document.getElementById('paper-tbody');
+  const lbl   = document.getElementById('paper-trade-count');
+  if (!trades || !trades.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No paper trades today</td></tr>';
+    lbl.textContent = '';
+    return;
+  }
+  lbl.textContent = trades.length + ' trade' + (trades.length !== 1 ? 's' : '');
+  tbody.innerHTML = trades.map(t => {
+    const slip = t.paper_entry_slippage != null
+      ? '<span class="neg">-$' + Math.abs(t.paper_entry_slippage * 100).toFixed(2) + '</span>'
+      : '<span class="dash">—</span>';
+    const pnlCell = t.pnl != null
+      ? '<td class="' + (t.pnl > 0 ? 'tppos' : 'tpneg') + '">' + fMoney(t.pnl) + '</td>'
+      : '<td class="tpnil">—</td>';
+    const tip = (t.ai_entry_reasoning || '').replace(/"/g, '&quot;');
+    return '<tr title="' + tip + '">' +
+      '<td>' + fTime(t.entry_time) + '</td>' +
+      '<td class="tr">' + (t.wing_width  != null ? t.wing_width  : '—') + '</td>' +
+      '<td class="tr">' + (t.put_strike  != null ? t.put_strike  : '—') + '</td>' +
+      '<td class="tr">' + (t.call_strike != null ? t.call_strike : '—') + '</td>' +
+      '<td class="tr tcredit">$' + Number(t.net_credit || 0).toFixed(2) + '</td>' +
+      '<td class="tr">' + slip + '</td>' +
+      '<td>' + bdg(t.put_status)  + '</td>' +
+      '<td>' + bdg(t.call_status) + '</td>' +
+      pnlCell + '</tr>';
+  }).join('');
+}
+
+function renderPaperChart(marks) {
+  const canvas = document.getElementById('paper-canvas');
+  const empty  = document.getElementById('paper-chart-empty');
+  if (!marks || !marks.length) {
+    canvas.style.display = 'none'; empty.style.display = 'block'; return;
+  }
+  canvas.style.display = 'block'; empty.style.display = 'none';
+  const labels = marks.map(m => {
+    const s = String(m.mark_time || '');
+    return s.replace('T', ' ').substring(11, 16);
+  });
+  const vals = marks.map(m => m.total_unrealized != null ? Number(m.total_unrealized).toFixed(2) : null);
+  const color = (vals[vals.length - 1] || 0) >= 0 ? '#00c896' : '#e8423a';
+  if (paperChart) {
+    paperChart.data.labels = labels;
+    paperChart.data.datasets[0].data = vals;
+    paperChart.data.datasets[0].borderColor = color;
+    paperChart.data.datasets[0].backgroundColor = color + '22';
+    paperChart.update(); return;
+  }
+  paperChart = new Chart(canvas, {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Unrealized P&L', data: vals,
+      borderColor: color, backgroundColor: color + '22',
+      borderWidth: 2, pointRadius: 2, pointHoverRadius: 4,
+      fill: true, tension: 0.3, spanGaps: true }] },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.y }}},
+      scales: {
+        x: { grid: { color: '#1e2430' }, ticks: { color: '#6b7280', font: { size: 10 } } },
+        y: { grid: { color: '#1e2430' }, ticks: { color: '#6b7280', font: { size: 10 },
+               callback: v => '$' + v }}
+      }
+    }
+  });
+}
+
+function renderPaper(d) {
+  paperCache = d;
+  renderPaperStats(d.stats || {});
+  renderPaperTrades(d.paper_trades || []);
+  renderPaperChart(d.mark_series || []);
+}
+
+async function fetchPaper() {
+  if (!paperVisible()) return;
+  try {
+    const r = await fetch('/api/paper');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.ok !== false) renderPaper(d);
+  } catch(_) {}
+}
+
+// ── nav — also trigger paper fetch when switching to paper tab ────────────────
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => {
+    if (el.dataset.view === 'paper') fetchPaper();
+  });
+});
+
 // ── auto-refresh ──────────────────────────────────────────────────────────────
 fetchData();
 setInterval(() => {
   cd--;
   document.getElementById('scountdown').textContent = 'Refresh in ' + cd + 's';
-  if (cd <= 0) { cd = 30; fetchData(); }
+  if (cd <= 0) { cd = 30; fetchData(); if (paperVisible()) fetchPaper(); }
 }, 1000);
 setInterval(fetchLog, 10000);
 </script>
@@ -977,6 +1268,18 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/data":
             try:
                 result = _build_api_data()
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc)}
+            body = json.dumps(result, default=str).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/api/paper":
+            try:
+                result = _build_paper_data()
             except Exception as exc:
                 result = {"ok": False, "error": str(exc)}
             body = json.dumps(result, default=str).encode("utf-8")

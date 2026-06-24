@@ -42,9 +42,60 @@ Otherwise record the current ET time and session window — you will need both t
 
 ---
 
+## STEP 2.5: Daily Connection Check
+
+Run **once per trading day** — skip if already completed this session. Check `loop_log` for a `session_init` action on today's date:
+
+```bash
+python -c "
+import sqlite3, json, datetime
+conn = sqlite3.connect('data/meic_trades.db')
+conn.row_factory = sqlite3.Row
+today = str(datetime.date.today())
+n = conn.execute(\"SELECT COUNT(*) AS n FROM loop_log WHERE DATE(loop_time)=? AND action='session_init'\", (today,)).fetchone()['n']
+print(json.dumps({'already_run': n > 0}))
+conn.close()
+"
+```
+
+If `already_run: true` → skip to Step 3.
+
+If `already_run: false`:
+
+1. Call `get_connection_status`. Extract `connected`, `credentials_present`, `live_trading_enabled`, and `account_count`.
+
+2. If `ok: false` or `connected: false` → log WARN and proceed to Step 3 (Step 3a will also catch the failure and stop the iteration if needed). Still record `session_init` below so this check does not re-run every iteration while the connection is down.
+
+3. Log the result:
+   ```bash
+   python notify.py log_event --level=INFO \
+     --message="[Session Init] tastytrade MCP connected=<X> | credentials=<Y> | live_trading=<Z> | accounts=<N>"
+   ```
+
+4. Record `session_init` in `loop_log`:
+   ```bash
+   python db.py log_loop_action \
+     --action=session_init \
+     --reasoning="Daily connection check: connected=<X>, credentials_present=<Y>, live_trading_enabled=<Z>, account_count=<N>." \
+     --open_trades=<from Step 1> \
+     --today_count=<from Step 1> \
+     --today_pnl=<from Step 1>
+   ```
+
+This check runs on the first iteration after the time gate passes each trading day — naturally at or just after 09:30 ET on a normal start, or immediately before the first trade assessment if the agent starts later.
+
+---
+
 ## STEP 3: Market Assessment
 
 Call MCP tools as described below. Abort the iteration if any required step fails.
+
+**Retryable errors**: when an MCP tool returns `ok: false`, check the response for `"retryable": true`. This flag indicates a transient upstream failure (e.g. 5xx gateway error from the tastytrade API) — not a bug in the MCP server or agent. If `retryable: true`:
+- Take no trading action; skip to Step 7 with `action=monitor_only`
+- Log at INFO level (not WARN) — this is expected noise, not a conflict
+- **Do not count toward Hard Limit 7's consecutive-error threshold**
+
+If `retryable` is absent or `false`, treat as a permanent/unexpected failure: log WARN, count toward Hard Limit 7.
 
 ### 3a. Connection check
 Call `get_connection_status`. If `ok != true` → log error, stop iteration.
@@ -79,6 +130,8 @@ Extract from `get_market_overview`:
 - `iv_percentile` — also a string; convert with `float()` before use
 - Underlying last price (the `last` field in the symbol's metrics entry)
 
+A retryable error on `get_market_overview` aborts the iteration — IV rank is required for live trading decisions.
+
 ### 3d. Option chain
 
 `get_option_chain` returns instrument fields per strike. By default it returns only an **ATM window of ~31 strikes** (15 each side of the money), not the entire chain. To get per-strike greeks, add `include_greeks: true`. Greeks come from the live DXLink feed, so request them only when greeks drive a decision.
@@ -89,10 +142,13 @@ Extract from `get_market_overview`:
   "symbol": "<config.symbol>",
   "expiration": "<today YYYY-MM-DD>",
   "include_greeks": true,
+  "include_quotes": true,
   "around_price": <underlying last price from Step 3c>,
   "greeks_timeout": 6.0
 }
 ```
+
+Each strike now includes `bid`, `ask`, and `mid` fields. Use `mid` for per-strike IV skew comparison (put mid vs. call mid at equidistant OTM strikes) and for partial-position re-evaluation in Step 4f. Net credit for entry comes from `get_strategies` (see Step 3f) — do not independently derive credit from chain quotes.
 
 Derive:
 - ATM strike — closest to current underlying price
@@ -128,7 +184,7 @@ python notify.py log_event --level=WARN \
 ```
 
 ### 3f. Strategy candidates — wing width selection
-Call `get_strategies` in parallel for each width in `config.wing_width_candidates`, using the same `symbol`, `target_dte: 0`, and `short_delta: config.delta_target` each time. Filter out any width where `width × 100 > available_buying_power_with_buffer`. From the remaining candidates, choose the width that best fits current conditions:
+Call `get_strategies` in parallel for each width in `config.wing_width_candidates`, using the same `symbol`, `target_dte: 0`, `short_delta: config.delta_target`, and **`around_price: <underlying last price from Step 3c>`** each time. Passing `around_price` is required — it centers the live-greeks window used for delta-based strike selection. Filter out any width where `width × 100 > available_buying_power_with_buffer`. From the remaining candidates, choose the width that best fits current conditions:
 
 - **Earlier in the session** (prime/midday): favor wider wings — more credit collected per entry, more room for the underlying to move
 - **Later in the session** (afternoon/late) or when multiple ICs are already open: favor narrower wings — lower max loss per spread limits tail risk as gamma accelerates
@@ -137,7 +193,17 @@ Call `get_strategies` in parallel for each width in `config.wing_width_candidate
 - **Subsequent entries**: consider how the new IC's strikes interact with already-open positions; avoid layering strikes too close together
 - **Elevated gamma at candidate short strikes**: if short-strike gamma from Step 3d is above 0.07, favor narrower wings — accelerating gamma means spread value can move sharply, and a narrower wing caps max loss
 
-Record the chosen width as `wing_width` and extract: put strike, call strike, leg symbols, estimated net credit, estimated POP.
+From the `get_strategies` response, extract for the chosen width:
+- `net_credit` — per-share credit (e.g. `1.20`); comes directly from the response
+- `net_credit_per_contract` — dollar value per contract (e.g. `120.0`)
+- `quotes_complete` — `true` if all four legs received live quotes; `false` if the DXLink feed was temporarily unavailable
+- `greeks_used_for_strike_selection` — `true` if live greeks drove strike selection; `false` means the tool fell back to a positional heuristic and the returned strikes may not match `config.delta_target`
+
+**If `quotes_complete == false`**: `net_credit` will be `null`. Do **not** estimate credit from strike prices. Skip entry for this iteration, log `"quotes unavailable — retrying next wakeup"`, and proceed to Step 7. This is distinct from the `get_market_overview` 502 — quotes come from a separate feed and may recover independently.
+
+**If `greeks_used_for_strike_selection == false`**: log a WARN. Cross-check the returned short strikes against the Step 3d chain — verify their deltas are near `config.delta_target` before proceeding. If the strikes look wrong, skip entry for this iteration.
+
+Record: `wing_width`, put/call strikes, leg symbols, `net_credit`, `net_credit_per_contract`, `estimated_pop`.
 
 ### Classify session quality
 Based on current ET time:
@@ -318,9 +384,10 @@ python db.py update_trade --ic_order_id=<X> --exit_analysis='<updated json>'
 
 **Hard stops — never enter if:**
 - `max_entries_per_day != -1` AND `today_count >= max_entries_per_day`
-- Current time < `entry_window_start` (09:45) — avoid open-bell volatility
+- Current time < `entry_window_start` (read from config) — avoid open-bell volatility
 - Current time > `entry_window_end` (15:30)
 - Buying power is insufficient
+- `quotes_complete == false` — DXLink quote feed unavailable; `net_credit` is null; retry next wakeup
 - `net_credit < config.min_credit` (premium too thin to justify the risk and fees)
 - `net_credit > config.max_credit` (unusually wide — verify before accepting)
 
@@ -341,7 +408,7 @@ python db.py update_trade --ic_order_id=<X> --exit_analysis='<updated json>'
 
 Only run this step if Step 5 decided to enter.
 
-1. Call `get_strategies` again for fresh leg symbols (prices move between assessments).
+1. Call `get_strategies` again for fresh leg symbols (prices move between assessments). Pass the same `around_price` from Step 3c so strike selection uses live greeks.
 
 ### Entry mode selection
 
@@ -449,10 +516,17 @@ Run at the end of **every** iteration:
 
 ```bash
 python db.py log_loop_action \
-  --action="<one of: time_gate_stop, monitor_only, entered_ic, stop_tightened, stop_triggered, force_closed, eod>" \
+  --action=<one of: time_gate_stop, monitor_only, entered_ic, stop_tightened, stop_triggered, force_closed, eod> \
   --reasoning="<1-2 sentence summary of what happened and why>" \
-  --market_context='{"iv_rank":<X>,"session_quality":"<S>","underlying_price":<U>,"open_trades":<N>,"today_count":<M>,"today_pnl":<P>}'
+  --iv_rank=<X or omit if null> \
+  --session_quality=<S> \
+  --underlying_price=<U> \
+  --open_trades=<N> \
+  --today_count=<M> \
+  --today_pnl=<P>
 ```
+
+**Always use flat args** (`--iv_rank`, `--session_quality`, etc.) — **never** pass `--market_context` with a JSON string. JSON in single-quoted bash args triggers permission prompts. Omit `--iv_rank` entirely when it is null rather than passing the string "null".
 
 ```bash
 python notify.py log_event --level=INFO \
@@ -523,7 +597,8 @@ Apply the conservative default for the conflict type, then log a detailed descri
 | Uncertain whether to force-close a spread | **Close it** — near expiry, protecting capital outweighs the cost of closing early |
 | Uncertain post-stop spread action | **Leave the DAY stop working** — it will handle the downside if the move continues |
 | Uncertain partial trade re-evaluation | **Hold current position** — append the conflict to `exit_analysis` and reassess next iteration |
-| MCP returns unexpected data or structure | **Take no trading action** — log the raw response; treat as a skipped iteration |
+| MCP returns retryable error (`retryable: true`) | **Skip iteration** — log INFO, do not count toward Hard Limit 7; retry automatically next wakeup |
+| MCP returns non-retryable error or unexpected data | **Take no trading action** — log WARN with raw response; count toward Hard Limit 7 |
 | Any other conflict | **Protect capital** — choose whichever available action reduces exposure, then log |
 
 Log every conflict as a WARN with a detailed plain English account — write it as if explaining the situation to the account owner who will read it after the session. Include:
@@ -551,7 +626,102 @@ Review `logs/agent.log` WARN entries after EOD to identify patterns and refine a
 4. **Never** place more than 1 new IC per loop iteration
 5. **If DB read fails** → log error, do not proceed with any trading actions
 6. **If net_liquidating_value dropped > 5%** vs. prior day → halt all entries, send alert
-7. **If MCP returns errors on 3 consecutive iterations** (check loop_log) → halt and send alert
+7. **If MCP returns 3 consecutive non-retryable errors** (check loop_log; retryable errors do not count) → halt and send alert
+
+---
+
+## PAPER TRADING MODE
+
+When `config.paper_trade_mode == true`, the loop runs identically to the live loop **except** that all `execute_trade` and `close_position` calls are replaced with local simulation. No real orders are ever sent to the broker. Read `config.paper_trade_mode` at the start of every iteration.
+
+### What stays the same
+- Steps 1–3 run fully (DB state, time gate, market assessment, option chain, strategies)
+- Step 7 logging runs fully
+- All entry decisions and stop-management logic run the same way
+- `get_strategies` results are used the same way to select strikes and credit
+
+### What changes — per step
+
+**Step 4a — Stop simulation (replaces checking working orders)**
+
+Instead of checking `get_working_orders`, evaluate spread values from the live option chain:
+
+```python
+from paper_trading import spread_mid_from_chain, check_stops
+chain_by_symbol = {strike["symbol"]: strike for strike in chain_strikes}
+put_val  = spread_mid_from_chain(trade["put_symbol"],  trade["long_put_symbol"],  chain_by_symbol)
+call_val = spread_mid_from_chain(trade["call_symbol"], trade["long_call_symbol"], chain_by_symbol)
+stops = check_stops(trade, put_val, call_val)
+```
+
+If `stops["put_stopped"]` → simulate fill at `stops["put_exit_cost"]` (= stop_limit × net_credit); update status to `stopped` or `partial` per the same post-stop logic as the live loop. If `stops["call_stopped"]` similarly. Record `exit_reason=stop_triggered`.
+
+**Step 4c — Record simulated stop levels (replaces placing broker stop orders)**
+
+For newly confirmed (simulated) fills, instead of placing stop-limit orders, store the trigger and limit ratios in the existing fields:
+```bash
+python db.py update_trade --ic_order_id=<X> \
+  --stop_trigger_current=<round(net_credit * stop_trigger_ratio, 2)> \
+  --stop_limit_current=<round(net_credit * stop_limit_ratio, 2)>
+```
+These dollar-value thresholds are what `check_stops()` compares against spread values each iteration.
+
+**Step 4d — Stop tightening**
+
+Works identically to live mode: when conditions warrant tightening, update `stop_trigger_current` / `stop_limit_current` in the DB via `update_trade`. No broker call needed.
+
+**Step 4e — EOD settlement (replaces broker settlement)**
+
+At 15:55 ET, for each open paper trade, fetch the current option chain and compute spread values:
+
+```python
+put_val  = spread_mid_from_chain(trade["put_symbol"],  trade["long_put_symbol"],  chain_by_symbol)
+call_val = spread_mid_from_chain(trade["call_symbol"], trade["long_call_symbol"], chain_by_symbol)
+exit_cost = (put_val or 0) + (call_val or 0)
+pnl = round((trade["net_credit"] - exit_cost) * 100 * trade["quantity"], 2)
+```
+
+Update status to `expired`, record `pnl` and `exit_reason=expired_eod`.
+
+**Step 6 — Simulated entry (replaces execute_trade)**
+
+After the entry decision is made in Step 5, simulate the fill:
+
+```python
+from paper_trading import simulate_entry_credit
+legs = [
+    {"action": "Sell to Open", "bid": short_put_bid, "ask": short_put_ask},
+    {"action": "Buy to Open",  "bid": long_put_bid,  "ask": long_put_ask},
+    {"action": "Sell to Open", "bid": short_call_bid, "ask": short_call_ask},
+    {"action": "Buy to Open",  "bid": long_call_bid,  "ask": long_call_ask},
+]
+paper_credit = simulate_entry_credit(legs)
+slippage_total = round(net_credit - paper_credit, 4)
+```
+
+Generate a local IC group ID (same as Step 6b pattern):
+```bash
+python -c "import pytz, datetime; et=pytz.timezone('America/New_York'); now=datetime.datetime.now(et); print('PAPER-' + now.strftime('%Y%m%d-%H%M%S-%f'))"
+```
+
+Save to DB with `is_paper=1`, `net_credit=paper_credit`, `paper_entry_slippage=slippage_total`, and `status=open` (paper fills are assumed instant — no pending state). Set `fill_confirmed_at` to now.
+
+Then immediately store stop trigger/limit levels (Step 4c pattern above).
+
+**Step 7 — Paper mark (append after each iteration)**
+
+For each open paper trade, save a mark after the chain data is available:
+```bash
+python db.py save_paper_mark \
+  --ic_order_id=<X> \
+  --put_spread_value=<Y> \
+  --call_spread_value=<Z> \
+  --unrealized_pnl=<P>
+```
+
+### Exclusivity
+
+`paper_trade_mode=true` is a hard gate: **never** call `execute_trade` or `close_position` when it is enabled, even for dry_run=true. The chain data and DB are the sole source of truth.
 
 ---
 

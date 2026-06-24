@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     exit_time TEXT, exit_price REAL, exit_reason TEXT, exit_analysis TEXT,
     put_stop_cost REAL, call_stop_cost REAL,
     pnl REAL, fees REAL, fill_confirmed_at TEXT,
+    is_paper INTEGER DEFAULT 0,
+    paper_entry_slippage REAL,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS daily_summary (
@@ -68,6 +70,18 @@ CREATE TABLE IF NOT EXISTS loop_log (
     today_pnl REAL DEFAULT 0, iv_rank REAL, underlying_price REAL,
     session_quality TEXT, mcp_errors TEXT DEFAULT '[]',
     duration_ms INTEGER, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_marks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ic_order_id TEXT NOT NULL,
+    mark_time TEXT NOT NULL,
+    mark_date TEXT NOT NULL,
+    put_spread_value REAL,
+    call_spread_value REAL,
+    total_spread_value REAL,
+    unrealized_pnl REAL,
+    notes TEXT,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -121,11 +135,12 @@ def _insert_summary(conn, **kwargs):
 
 @pytest.fixture
 def db_path(monkeypatch, tmp_path):
-    """Temp DB with schema; monkeypatches dashboard._DB_PATH."""
+    """Temp DB with schema; monkeypatches dashboard._DB_PATH and _today."""
     path = str(tmp_path / "meic_trades.db")
     conn = _make_db(path)
     conn.close()
     monkeypatch.setattr(dashboard, "_DB_PATH", path)
+    monkeypatch.setattr(dashboard, "_today", lambda: _TODAY)
     return path
 
 
@@ -394,3 +409,121 @@ def test_build_api_data_today_merges_into_week(db_path):
     # week should include both yesterday's summary and today's live trade
     assert result["stats"]["week"]["net_pnl"] >= 2.00
     assert result["stats"]["week"]["total_trades"] >= 1
+
+
+# ── paper trade isolation ─────────────────────────────────────────────────────
+
+def test_paper_trades_excluded_from_live_stats(db_path):
+    """Paper trades (is_paper=1) must not appear in live today stats."""
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-LIVE", pnl=1.20, status="expired")
+    _insert_trade(conn, ic_order_id="IC-PAPER", pnl=2.00, status="expired",
+                  is_paper=1)
+    conn.close()
+    result = dashboard._build_api_data()
+    assert result["stats"]["today"]["net_pnl"] == 1.20
+    assert result["stats"]["today"]["total_trades"] == 1
+
+def test_paper_trades_excluded_from_live_trades_list(db_path):
+    """Paper trades must not appear in the live trades table."""
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-LIVE",  pnl=1.20, status="expired")
+    _insert_trade(conn, ic_order_id="IC-PAPER", pnl=2.00, status="expired",
+                  is_paper=1)
+    conn.close()
+    result = dashboard._build_api_data()
+    ids = [t["ic_order_id"] for t in result["trades"]]
+    assert "IC-LIVE"  in ids
+    assert "IC-PAPER" not in ids
+
+
+# ── _build_paper_data ─────────────────────────────────────────────────────────
+
+def test_build_paper_data_no_db(monkeypatch, tmp_path):
+    monkeypatch.setattr(dashboard, "_DB_PATH", str(tmp_path / "nonexistent.db"))
+    result = dashboard._build_paper_data()
+    assert result["ok"] is False
+
+def test_build_paper_data_empty(db_path):
+    result = dashboard._build_paper_data()
+    assert result["ok"] is True
+    assert result["paper_trades"] == []
+    assert result["mark_series"] == []
+    assert result["stats"]["today"]["net_pnl"] == 0.0
+    assert result["stats"]["today"]["total_trades"] == 0
+
+def test_build_paper_data_stats_keys(db_path):
+    result = dashboard._build_paper_data()
+    for period in ("today", "all_time"):
+        s = result["stats"][period]
+        for key in ("net_pnl", "total_trades", "wins", "losses", "wl_ratio"):
+            assert key in s, f"Missing key '{key}' in paper stats.{period}"
+
+def test_build_paper_data_with_paper_trade(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="PAPER-001", pnl=1.50, status="expired",
+                  is_paper=1, paper_entry_slippage=0.02)
+    conn.close()
+    result = dashboard._build_paper_data()
+    assert result["stats"]["today"]["net_pnl"] == 1.50
+    assert result["stats"]["today"]["total_trades"] == 1
+    assert result["stats"]["today"]["wins"] == 1
+    assert len(result["paper_trades"]) == 1
+    t = result["paper_trades"][0]
+    assert t["ic_order_id"] == "PAPER-001"
+    assert "put_status" in t
+    assert "call_status" in t
+
+def test_build_paper_data_excludes_live_trades(db_path):
+    """Live trades (is_paper=0) must not appear in paper stats."""
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-LIVE",  pnl=5.00, status="expired",
+                  is_paper=0)
+    _insert_trade(conn, ic_order_id="IC-PAPER", pnl=1.50, status="expired",
+                  is_paper=1)
+    conn.close()
+    result = dashboard._build_paper_data()
+    assert result["stats"]["today"]["net_pnl"] == 1.50
+    assert result["stats"]["today"]["total_trades"] == 1
+    ids = [t["ic_order_id"] for t in result["paper_trades"]]
+    assert "IC-PAPER" in ids
+    assert "IC-LIVE"  not in ids
+
+def test_build_paper_data_alltime_spans_days(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="PAPER-001", trade_date="2026-06-19",
+                  pnl=1.00, status="expired", is_paper=1)
+    _insert_trade(conn, ic_order_id="PAPER-002", trade_date=_TODAY,
+                  pnl=2.00, status="expired", is_paper=1)
+    conn.close()
+    result = dashboard._build_paper_data()
+    assert result["stats"]["all_time"]["total_trades"] == 2
+    assert abs(result["stats"]["all_time"]["net_pnl"] - 3.00) < 0.01
+
+def test_build_paper_data_mark_series_empty(db_path):
+    result = dashboard._build_paper_data()
+    assert result["mark_series"] == []
+
+def test_build_paper_data_mark_series_aggregated(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="PAPER-001", status="open",
+                  net_credit=1.20, pnl=None, is_paper=1)
+    _insert_trade(conn, ic_order_id="PAPER-002", status="open",
+                  net_credit=1.00, pnl=None, is_paper=1)
+    # Two marks at the same time → should be summed
+    mark_time = _TODAY + " 10:30:00"
+    conn.execute("""INSERT INTO paper_marks
+        (ic_order_id, mark_time, mark_date, put_spread_value, call_spread_value,
+         total_spread_value, unrealized_pnl, created_at)
+        VALUES (?,?,?,?,?,?,?,?)""",
+        ("PAPER-001", mark_time, _TODAY, 0.30, 0.25, 0.55, 65.0, _NOW))
+    conn.execute("""INSERT INTO paper_marks
+        (ic_order_id, mark_time, mark_date, put_spread_value, call_spread_value,
+         total_spread_value, unrealized_pnl, created_at)
+        VALUES (?,?,?,?,?,?,?,?)""",
+        ("PAPER-002", mark_time, _TODAY, 0.20, 0.15, 0.35, 45.0, _NOW))
+    conn.commit()
+    conn.close()
+    result = dashboard._build_paper_data()
+    assert len(result["mark_series"]) == 1
+    assert abs(result["mark_series"][0]["total_unrealized"] - 110.0) < 0.01

@@ -51,7 +51,8 @@ Key fields to update in `config.json`:
 | `wing_width_candidates` | Wing widths to evaluate per entry (agent picks the best) |
 | `quantity` | Number of contracts per IC leg |
 | `max_entries_per_day` | Hard cap on entries (`-1` = no cap, rely on AI + buying power) |
-| `sandbox` | `true` to use the tastytrade developer sandbox, `false` for your live account |
+| `entry_window_start` | Earliest time to enter new ICs in HH:MM ET (default `"10:00"`) |
+| `paper_trade_mode` | `true` to run full strategy with simulated fills — no real orders sent |
 | `email.enabled` | `true` to send alerts via SendGrid (optional — logs are always written to `logs/agent.log` regardless) |
 | `email.from` | Verified SendGrid sender address |
 | `email.to` | Address to receive alerts |
@@ -101,16 +102,18 @@ This creates `data/meic_trades.db` (SQLite, WAL mode). Safe to run multiple time
 
 ### 7. Configure the MCP server
 
-The Claude Code MCP connection is pre-configured in `.claude/settings.json`. By default it runs in sandbox mode with live trading disabled:
+The tastytrade MCP server is defined in `.mcp.json` at the project root and enabled via `.claude/settings.local.json`. By default live trading is disabled and a buying-power buffer is applied:
 
 ```json
 {
-  "TASTYTRADE_SANDBOX": "true",
-  "ENABLE_LIVE_TRADING": "false"
+  "ENABLE_LIVE_TRADING": "false",
+  "FORCE_DRY_RUN": "true",
+  "BUYING_POWER_BUFFER_PCT": "25",
+  "ACCOUNT_DEPLOY_LIMIT_PCT": "80"
 }
 ```
 
-To go live, set both to `"true"` and update `"sandbox": false` in `config.json`.
+These environment variables are read by the `tastytrade-mcp` process at startup. To go live, set `ENABLE_LIVE_TRADING` to `"true"` and remove `FORCE_DRY_RUN` (or set it to `"false"`) in `.mcp.json`, then restart the Claude Code session so the MCP server picks up the new env.
 
 ---
 

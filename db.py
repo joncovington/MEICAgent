@@ -133,6 +133,19 @@ CREATE TABLE IF NOT EXISTS loop_log (
     duration_ms      INTEGER,
     created_at       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS paper_marks (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ic_order_id         TEXT NOT NULL,
+    mark_time           TEXT NOT NULL,
+    mark_date           TEXT NOT NULL,
+    put_spread_value    REAL,
+    call_spread_value   REAL,
+    total_spread_value  REAL,
+    unrealized_pnl      REAL,
+    notes               TEXT,
+    created_at          TEXT NOT NULL
+)
 """
 
 
@@ -151,6 +164,8 @@ def cmd_init_db(_args):
         ("price_action_signal",        "TEXT"),
         ("put_spread_entry_order_id",  "TEXT"),
         ("call_spread_entry_order_id", "TEXT"),
+        ("is_paper",                "INTEGER DEFAULT 0"),
+        ("paper_entry_slippage",    "REAL"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE ic_trades ADD COLUMN {col} {col_type}")
@@ -418,6 +433,56 @@ def cmd_save_daily_summary(args):
 
 
 # ---------------------------------------------------------------------------
+# Paper trading commands
+# ---------------------------------------------------------------------------
+
+def cmd_save_paper_mark(args):
+    now = str(_now_et())
+    today = _today_et()
+    put_val  = args.put_spread_value
+    call_val = args.call_spread_value
+    total    = None
+    if put_val is not None and call_val is not None:
+        total = round(float(put_val) + float(call_val), 4)
+    conn = _connect()
+    conn.execute(
+        """INSERT INTO paper_marks
+           (ic_order_id, mark_time, mark_date,
+            put_spread_value, call_spread_value, total_spread_value,
+            unrealized_pnl, notes, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (args.ic_order_id, now, today,
+         put_val, call_val, total,
+         args.unrealized_pnl, args.notes, now)
+    )
+    conn.commit()
+    conn.close()
+    _out({"ok": True})
+
+
+def cmd_get_paper_trades(_args):
+    today = _today_et()
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM ic_trades WHERE is_paper = 1 AND trade_date = ? ORDER BY entry_time",
+        (today,)
+    ).fetchall()
+    conn.close()
+    _out({"ok": True, "paper_trades": [dict(r) for r in rows]})
+
+
+def cmd_get_paper_pnl(_args):
+    today = _today_et()
+    conn = _connect()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(pnl), 0) AS total FROM ic_trades WHERE is_paper = 1 AND trade_date = ?",
+        (today,)
+    ).fetchone()
+    conn.close()
+    _out({"ok": True, "paper_pnl": round(float(row["total"]), 2)})
+
+
+# ---------------------------------------------------------------------------
 # CLI dispatch
 # ---------------------------------------------------------------------------
 
@@ -465,6 +530,16 @@ def main():
     p_log.add_argument("--today_count", default=None, type=int)
     p_log.add_argument("--today_pnl", default=None, type=float)
 
+    p_pm = sub.add_parser("save_paper_mark")
+    p_pm.add_argument("--ic_order_id", required=True)
+    p_pm.add_argument("--put_spread_value", default=None, type=float)
+    p_pm.add_argument("--call_spread_value", default=None, type=float)
+    p_pm.add_argument("--unrealized_pnl", default=None, type=float)
+    p_pm.add_argument("--notes", default=None)
+
+    sub.add_parser("get_paper_trades")
+    sub.add_parser("get_paper_pnl")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -478,6 +553,9 @@ def main():
         "save_daily_summary": cmd_save_daily_summary,
         "record_stop_adjustment": cmd_record_stop_adjustment,
         "log_loop_action": cmd_log_loop_action,
+        "save_paper_mark": cmd_save_paper_mark,
+        "get_paper_trades": cmd_get_paper_trades,
+        "get_paper_pnl": cmd_get_paper_pnl,
     }
 
     fn = dispatch.get(args.command)

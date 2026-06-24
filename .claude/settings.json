@@ -1,18 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python *)",
-      "Bash(python db.py *)",
-      "Bash(python notify.py *)",
-      "Bash(python -c *)",
-      "Bash(git add *)",
-      "Bash(git commit -m ' *)",
-      "Bash(git check-ignore *)",
-      "PowerShell(python db.py *)",
-      "PowerShell(python notify.py *)",
-      "PowerShell(python -c *)",
-      "PowerShell(python *.py)",
-      "PowerShell(Start-Process python *)",
+      "Bash(*)",
+      "PowerShell(*)",
       "Skill(fewer-permission-prompts)",
       "Skill(fewer-permission-prompts:*)",
       "mcp__tastytrade__get_connection_status",
@@ -23,29 +13,19 @@
       "mcp__tastytrade__get_positions",
       "mcp__tastytrade__get_working_orders",
       "mcp__tastytrade__list_accounts",
-      "mcp__tastytrade__get_watchlists"
+      "mcp__tastytrade__get_watchlists",
+      "mcp__tastytrade__execute_trade",
+      "mcp__tastytrade__adjust_order",
+      "mcp__tastytrade__close_position"
     ]
   },
   "mcpServers": {
     "tastytrade": {
       "command": "tastytrade-mcp",
+      "args": [],
       "env": {
-        "TASTYTRADE_SANDBOX": "true",
         "ENABLE_LIVE_TRADING": "false",
-        "FORCE_DRY_RUN": "false",
-        "BUYING_POWER_BUFFER_PCT": "25",
-        "ACCOUNT_DEPLOY_LIMIT_PCT": "80"
-      }
-    },
-    "tastytrade-mock": {
-      "command": "tastytrade-mcp",
-      "args": [
-        "--mock",
-        "--mock-fixture",
-        "tests/mock_fixture.json",
-        "--enable-live-trading"
-      ],
-      "env": {
+        "FORCE_DRY_RUN": "true",
         "BUYING_POWER_BUFFER_PCT": "25",
         "ACCOUNT_DEPLOY_LIMIT_PCT": "80"
       }

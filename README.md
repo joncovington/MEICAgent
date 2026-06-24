@@ -4,6 +4,8 @@ An AI-driven Multiple Entry Iron Condor (MEIC) strategy trading agent for 0DTE o
 
 The agent runs as a Claude Code `/loop` — on each iteration (~every 5 minutes during market hours) it reads persisted state, assesses market conditions, makes AI-driven entry and stop decisions, executes trades, and logs a plain English account of everything it did and why.
 
+Supports **paper trading mode** (`paper_trade_mode: true` in `config.json`) — runs the full strategy loop with simulated fills and stop checks against live option chain prices, with no real orders sent to the broker.
+
 ---
 
 ## Documentation
@@ -27,7 +29,7 @@ cp config.example.json config.json   # then edit config.json
 python db.py init_db
 
 # 4. Open in Claude Code and start the session (before 9:30 ET)
-/MEIC-start
+/meic-start
 ```
 
 See [docs/setup.md](docs/setup.md) for the full setup walkthrough.
@@ -43,14 +45,16 @@ MEICAgent/
 ├── db.py                            # SQLite CLI helper
 ├── notify.py                        # SendGrid email + structured log CLI helper
 ├── dashboard.py                     # Local browser dashboard (port 5050)
+├── paper_trading.py                 # Paper trading simulation helpers (slippage, stop checks, EOD settlement)
+├── .mcp.json                        # MCP server definition (tastytrade) — loaded by Claude Code
 ├── docs/
 │   ├── setup.md                     # Installation and configuration
 │   ├── operating.md                 # Running and monitoring the agent
 │   └── strategy.md                  # MEIC strategy details
 ├── .claude/
-│   ├── settings.json                # MCP server wiring for Claude Code
+│   ├── settings.json                # Permissions and MCP environment overrides
 │   └── commands/
-│       ├── MEIC-start.md            # /MEIC-start skill — launch full session
+│       ├── meic-start.md            # /meic-start skill — launch full session
 │       ├── dashboard.md             # /dashboard skill
 │       ├── eod-report.md            # /eod-report skill
 │       ├── meic-status.md           # /meic-status skill

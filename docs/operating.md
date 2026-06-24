@@ -2,13 +2,13 @@
 
 ## Pre-market session setup
 
-Run `/MEIC-start` before 9:30 ET — it launches the watchdog, dashboard, and agent loop in sequence:
+Run `/meic-start` before 9:30 ET — it launches the watchdog, dashboard, and agent loop in sequence:
 
 ```
-/MEIC-start
+/meic-start
 ```
 
-This opens two named terminal windows (watchdog + dashboard), opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not trade before 9:45 ET or after 15:30 ET, so starting early is safe.
+This launches the watchdog and dashboard as background processes, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 10:00 ET) or after 15:30 ET, so starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** (Step 2.5) to verify the tastytrade MCP is live before any market assessment begins.
 
 To start components individually instead:
 
@@ -37,7 +37,7 @@ Open the MEICAgent folder in VS Code with the Claude Code extension (or run `cla
 /loop
 ```
 
-The agent runs every ~5 minutes. The tastytrade MCP gates all market-hours checks, so starting early or leaving it running after close is safe — it will not attempt to trade outside market hours.
+The agent runs every ~5 minutes. The tastytrade MCP gates all market-hours checks, so starting early or leaving it running after close is safe — it will not attempt to trade outside market hours. New entries are additionally blocked before `entry_window_start` (default 10:00 ET) to avoid open-bell volatility.
 
 ---
 
@@ -68,8 +68,12 @@ python dashboard.py
 Opens at `http://localhost:5050` and auto-refreshes every 30 seconds.
 
 **Today view**
-- Multi-period stats grid — Net P&L, total trades, wins, losses, and W/L ratio across today / this week / this month / this year / all-time
+- Multi-period stats grid — Net P&L, total trades, wins, losses, and W/L ratio across today / this week / this month / this year / all-time (live trades only)
 - Trades table — each IC with entry time, strikes, wing width, per-spread credits, per-spread stop status badges (e.g. `STOPPED 11:21`), and P&L
+
+**Paper view**
+- Same stats grid and trades table as Today, but filtered to paper trades (`is_paper = 1`)
+- Includes slippage column showing simulated entry cost vs. mid-market credit
 
 **History view**
 - NLV trend chart — account value over all days where the EOD sequence has run

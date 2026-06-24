@@ -32,7 +32,7 @@ Any width where `width × 100 > available buying power` is eliminated before com
 
 | Window | Label | Notes |
 |---|---|---|
-| 09:30–10:00 | `open_volatile` | Elevated volatility; entries blocked until 09:45 (`entry_window_start`), then weigh IV rank and skew carefully |
+| 09:30–10:00 | `open_volatile` | Elevated volatility; entries blocked until `entry_window_start` (default 10:00, configurable in `config.json`); weigh IV rank and skew carefully |
 | 10:00–11:30 | `prime` | Preferred entry window |
 | 11:30–13:00 | `midday` | Generally good conditions |
 | 13:00–14:30 | `afternoon` | Less time remaining; weigh credit vs. time risk |
@@ -99,6 +99,7 @@ When signals conflict or inputs are ambiguous, the agent never halts. It applies
 | Conflicting stop tightening signals | Leave current stop in place |
 | Uncertain whether to force-close | Close it |
 | Uncertain post-stop action | Leave the DAY stop working |
-| MCP returns unexpected data | Take no trading action; log raw response |
+| MCP returns retryable error | Skip iteration (INFO log); retry automatically next wakeup |
+| MCP returns non-retryable error | Take no trading action; log WARN with raw response |
 
 All conflicts are logged as `WARN` in `logs/agent.log` for post-session review.

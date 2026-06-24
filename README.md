@@ -58,6 +58,7 @@ MEICAgent/
 │       ├── dashboard.md             # /dashboard skill
 │       ├── eod-report.md            # /eod-report skill
 │       ├── meic-status.md           # /meic-status skill
+│       ├── check-chain.md           # /check-chain skill — verify chain and strike selection
 │       ├── test-mcp.md              # /test-mcp skill
 │       └── watchdog.md              # /watchdog skill
 ├── data/                            # Created at first run (gitignored)

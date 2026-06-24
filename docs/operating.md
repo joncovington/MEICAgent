@@ -86,6 +86,24 @@ The dashboard reads directly from `data/meic_trades.db` — no extra dependencie
 
 ---
 
+## Verifying chain and strike selection
+
+Before the first live session, or after any tastytrade-mcp update, run:
+
+```
+/check-chain
+```
+
+This calls `get_market_overview`, `get_option_chain`, and `get_strategies` against today's expiration (or the next trading day if the market is closed), then cross-checks that:
+- Greeks and quotes are complete
+- `get_strategies` used live greeks for strike selection (not a positional fallback)
+- The selected strikes appear within the chain window
+- Short strike deltas are within ±0.05 of `delta_target`
+
+A **PASS** result means the chain and strike selection are ready. A **NEEDS ATTENTION** result identifies the specific failing check.
+
+---
+
 ## End-of-day report
 
 After 15:55 ET the agent automatically spawns the `/eod-report` skill, which:

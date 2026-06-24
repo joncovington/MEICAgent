@@ -128,7 +128,7 @@ Extract from `get_account_info`:
 Extract from `get_market_overview`:
 - `iv_rank` — returned as a string; convert with `float()` before use (0–1 scale, e.g. `"0.38"` = 38th percentile)
 - `iv_percentile` — also a string; convert with `float()` before use
-- Underlying last price (the `last` field in the symbol's metrics entry)
+- `last` — underlying last trade price (float); streamed from DXLink in parallel with the metrics fetch. Use this as `around_price` in `get_strategies` and `get_option_chain`. If absent (feed timeout), fall back to the ATM strike from Step 3d's chain.
 
 A retryable error on `get_market_overview` aborts the iteration — IV rank is required for live trading decisions.
 
@@ -313,8 +313,8 @@ For each trade confirmed fully filled:
      "stop_trigger": <round(net_credit × stop_trigger_ratio, 2)>,
      "price": <round(net_credit × stop_limit_ratio, 2)>,
      "legs": [
-       {"instrument_type": "Equity Option", "symbol": "<short_put_symbol>", "quantity": <qty>, "action": "Buy to Close"},
-       {"instrument_type": "Equity Option", "symbol": "<long_put_symbol>", "quantity": <qty>, "action": "Sell to Close"}
+       {"instrument_type": "<instrument_type from trade record>", "symbol": "<short_put_symbol>", "quantity": <qty>, "action": "Buy to Close"},
+       {"instrument_type": "<instrument_type from trade record>", "symbol": "<long_put_symbol>", "quantity": <qty>, "action": "Sell to Close"}
      ]
    }
    ```
@@ -432,6 +432,8 @@ Log the mode chosen and the deciding condition in `ai_entry_reasoning`.
 
 ### 6a. Combo entry (`config.separate_spread_entry == false`, or `"auto"` chose combo)
 
+> **`instrument_type` rule** — always read `instrument_type` from the corresponding leg in the `get_strategies` response (e.g. `"Equity Option"` for XSP, `"Future Option"` for /MES). Never hardcode it. The same value is used in stop orders (Step 4c) — store it alongside the leg symbols when saving the trade to DB.
+
 2. Dry-run (HARD LIMIT #1):
    ```json
    execute_trade({
@@ -439,10 +441,10 @@ Log the mode chosen and the deciding condition in `ai_entry_reasoning`.
      "order_type": "Limit",
      "price": <net_credit>,
      "legs": [
-       {"instrument_type": "Equity Option", "symbol": "<short_put>", "quantity": <qty>, "action": "Sell to Open"},
-       {"instrument_type": "Equity Option", "symbol": "<long_put>",  "quantity": <qty>, "action": "Buy to Open"},
-       {"instrument_type": "Equity Option", "symbol": "<short_call>","quantity": <qty>, "action": "Sell to Open"},
-       {"instrument_type": "Equity Option", "symbol": "<long_call>", "quantity": <qty>, "action": "Buy to Open"}
+       {"instrument_type": "<short_put.instrument_type>", "symbol": "<short_put>", "quantity": <qty>, "action": "Sell to Open"},
+       {"instrument_type": "<long_put.instrument_type>",  "symbol": "<long_put>",  "quantity": <qty>, "action": "Buy to Open"},
+       {"instrument_type": "<short_call.instrument_type>","symbol": "<short_call>","quantity": <qty>, "action": "Sell to Open"},
+       {"instrument_type": "<long_call.instrument_type>", "symbol": "<long_call>", "quantity": <qty>, "action": "Buy to Open"}
      ]
    }, dry_run=true)
    ```
@@ -480,8 +482,8 @@ If per-strike IV is unavailable, split evenly: `put_credit = call_credit = round
 ```json
 {"time_in_force": "Day", "order_type": "Limit", "price": <put_credit>,
  "legs": [
-   {"instrument_type": "Equity Option", "symbol": "<short_put>", "quantity": <qty>, "action": "Sell to Open"},
-   {"instrument_type": "Equity Option", "symbol": "<long_put>",  "quantity": <qty>, "action": "Buy to Open"}
+   {"instrument_type": "<short_put.instrument_type>", "symbol": "<short_put>", "quantity": <qty>, "action": "Sell to Open"},
+   {"instrument_type": "<long_put.instrument_type>",  "symbol": "<long_put>",  "quantity": <qty>, "action": "Buy to Open"}
  ]}
 ```
 If dry_run `ok=false` → abort entry entirely, skip to Step 7.
@@ -491,8 +493,8 @@ If ok → submit live, record `put_spread_entry_order_id`.
 ```json
 {"time_in_force": "Day", "order_type": "Limit", "price": <call_credit>,
  "legs": [
-   {"instrument_type": "Equity Option", "symbol": "<short_call>", "quantity": <qty>, "action": "Sell to Open"},
-   {"instrument_type": "Equity Option", "symbol": "<long_call>",  "quantity": <qty>, "action": "Buy to Open"}
+   {"instrument_type": "<short_call.instrument_type>", "symbol": "<short_call>", "quantity": <qty>, "action": "Sell to Open"},
+   {"instrument_type": "<long_call.instrument_type>",  "symbol": "<long_call>",  "quantity": <qty>, "action": "Buy to Open"}
  ]}
 ```
 If dry_run `ok=false` → **immediately cancel the put spread** (`close_position(put_spread_entry_order_id)`), abort entry, skip to Step 7.

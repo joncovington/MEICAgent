@@ -20,7 +20,7 @@ except ImportError:
     def _today_et():
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "meic_trades.db")
+_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "meic_trades.db")
 
 
 def _connect():

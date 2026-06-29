@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     fees                REAL DEFAULT 0,
     net_pnl             REAL DEFAULT 0,
     closing_nlv         REAL,
+    session_init_at     TEXT,
     win_count           INTEGER DEFAULT 0,
     win_rate_pct        REAL,
     avg_iv_rank         REAL,
@@ -161,7 +162,7 @@ def cmd_init_db(_args):
     if "trend_signal" in existing:
         conn.execute("ALTER TABLE ic_trades DROP COLUMN trend_signal")
     existing_ds = {row[1] for row in conn.execute("PRAGMA table_info(daily_summary)")}
-    for col, col_type in [("closing_nlv", "REAL")]:
+    for col, col_type in [("closing_nlv", "REAL"), ("session_init_at", "TEXT")]:
         if col not in existing_ds:
             conn.execute(f"ALTER TABLE daily_summary ADD COLUMN {col} {col_type}")
     conn.commit()
@@ -399,6 +400,34 @@ def cmd_log_loop_action(args):
     _out({"ok": True})
 
 
+def cmd_get_session_init(_args):
+    today = _today_et()
+    conn = _connect()
+    row = conn.execute(
+        "SELECT session_init_at FROM daily_summary WHERE summary_date = ?", (today,)
+    ).fetchone()
+    conn.close()
+    already_run = bool(row and row["session_init_at"])
+    _out({"already_run": already_run})
+
+
+def cmd_set_session_init(_args):
+    now = str(_now_et())
+    today = _today_et()
+    conn = _connect()
+    conn.execute(
+        """INSERT INTO daily_summary (summary_date, session_init_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(summary_date) DO UPDATE SET
+             session_init_at = excluded.session_init_at,
+             updated_at = excluded.updated_at""",
+        (today, now, now, now)
+    )
+    conn.commit()
+    conn.close()
+    _out({"ok": True, "session_init_at": now})
+
+
 def cmd_save_daily_summary(args):
     now = str(_now_et())
     date = args.date or _today_et()
@@ -433,6 +462,8 @@ def main():
     sub.add_parser("get_today_count")
     sub.add_parser("get_today_pnl")
     sub.add_parser("get_eod_summary")
+    sub.add_parser("get_session_init")
+    sub.add_parser("set_session_init")
 
     p_save = sub.add_parser("save_trade")
     p_save.add_argument("--data", required=True)
@@ -476,6 +507,8 @@ def main():
         "get_today_count": cmd_get_today_count,
         "get_today_pnl": cmd_get_today_pnl,
         "get_eod_summary": cmd_get_eod_summary,
+        "get_session_init": cmd_get_session_init,
+        "set_session_init": cmd_set_session_init,
         "save_trade": cmd_save_trade,
         "update_trade": cmd_update_trade,
         "save_daily_summary": cmd_save_daily_summary,

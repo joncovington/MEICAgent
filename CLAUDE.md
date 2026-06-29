@@ -40,18 +40,10 @@ Otherwise record the current ET time and session window — you will need both t
 
 ## STEP 2.5: Daily Connection Check
 
-Run **once per trading day** — skip if already completed this session. Check `loop_log` for a `session_init` action on today's date:
+Run **once per trading day** — skip if already completed this session. Check today's state in `daily_summary`:
 
 ```bash
-python -c "
-import sqlite3, json, datetime
-conn = sqlite3.connect('data/meic_trades.db')
-conn.row_factory = sqlite3.Row
-today = str(datetime.date.today())
-n = conn.execute(\"SELECT COUNT(*) AS n FROM loop_log WHERE DATE(loop_time)=? AND action='session_init'\", (today,)).fetchone()['n']
-print(json.dumps({'already_run': n > 0}))
-conn.close()
-"
+python src/db.py get_session_init
 ```
 
 If `already_run: true` → skip to Step 3.
@@ -68,14 +60,9 @@ If `already_run: false`:
      --message="[Session Init] tastytrade MCP connected=<X> | credentials=<Y> | live_trading=<Z> | accounts=<N>"
    ```
 
-4. Record `session_init` in `loop_log`:
+4. Record `session_init` in `daily_summary`:
    ```bash
-   python src/db.py log_loop_action \
-     --action=session_init \
-     --reasoning="Daily connection check: connected=<X>, credentials_present=<Y>, live_trading_enabled=<Z>, account_count=<N>." \
-     --open_trades=<from Step 1> \
-     --today_count=<from Step 1> \
-     --today_pnl=<from Step 1>
+   python src/db.py set_session_init
    ```
 
 This check runs on the first iteration after the time gate passes each trading day — naturally at or just after 09:30 ET on a normal start, or immediately before the first trade assessment if the agent starts later.
@@ -308,10 +295,24 @@ python src/db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason
 
 For each trade confirmed fully filled:
 1. Update status to `open` and record `fill_confirmed_at`
-2. Place two DAY stop-limit orders (one put spread, one call spread).
+2. Place two DAY stop orders (one put spread, one call spread). Read `config.stop_order_type` (default `"Stop"` if absent).
 
-   **Stop sizing intent**: both `stop_trigger` and `price` (limit) are calculated as a fraction of the **full IC net credit** — not the individual spread's credit. If the limit fires at 95% of IC credit, the cost to close the stopped spread ($0.95 on a $1.00 IC) nearly cancels the credit received, leaving a small residual (~$0.05) that offsets commissions. The other spread expires worthless. Net P&L on the full IC ≈ $0.
+   **Stop sizing intent**: `stop_trigger` is calculated as a fraction of the **full IC net credit** — not the individual spread's credit. At the default 0.95, the spread costs 95% of the original credit when the stop fires; the remaining 5% covers commissions. The other spread expires worthless. Net P&L on the full IC ≈ $0.
 
+   **Stop** (default — `config.stop_order_type == "Stop"`): closes at market price once the trigger fires; guaranteed execution, no price protection.
+   ```json
+   {
+     "time_in_force": "Day",
+     "order_type": "Stop",
+     "stop_trigger": <round(net_credit × stop_trigger_ratio, 2)>,
+     "legs": [
+       {"instrument_type": "<instrument_type from trade record>", "symbol": "<short_put_symbol>", "quantity": <qty>, "action": "Buy to Close"},
+       {"instrument_type": "<instrument_type from trade record>", "symbol": "<long_put_symbol>", "quantity": <qty>, "action": "Sell to Close"}
+     ]
+   }
+   ```
+
+   **Stop Limit** (`config.stop_order_type == "Stop Limit"`): places a limit order at `stop_limit_ratio × net_credit` after the trigger fires; protects against price gaps but risks not filling in fast markets.
    ```json
    {
      "time_in_force": "Day",
@@ -324,6 +325,7 @@ For each trade confirmed fully filled:
      ]
    }
    ```
+
    Same pattern for call spread. Always `dry_run=true` first, then `dry_run=false`.
 3. Update DB with stop order IDs:
    ```bash
@@ -333,7 +335,7 @@ For each trade confirmed fully filled:
 ### 4d. Evaluate stop tightening (for status=open trades)
 **Never loosen a stop.** Evaluate tightening only if `stop_adjustment_count < max_stop_adjustments_per_ic`.
 
-All trigger and limit prices are expressed as fractions of the **full IC net credit** (same basis as initial stop sizing). Use the reference thresholds below as starting points, then apply your judgment given current conditions. When multiple conditions apply, use the lowest (tightest) trigger. Maintain a 0.05 credit-fraction gap between trigger and limit (e.g., trigger 0.82 → limit 0.87). Document your reasoning and the levels chosen.
+All trigger prices are expressed as fractions of the **full IC net credit** (same basis as initial stop sizing). Use the reference thresholds below as starting points, then apply your judgment given current conditions. When multiple conditions apply, use the lowest (tightest) trigger. For Stop Limit orders, maintain a 0.05 credit-fraction gap between trigger and limit (e.g., trigger 0.82 → limit 0.87); for Stop orders, only the trigger changes. Document your reasoning and the levels chosen.
 
 | Condition | Reference trigger |
 |---|---|

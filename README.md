@@ -44,11 +44,13 @@ See [docs/setup.md](docs/setup.md) for the full setup walkthrough.
 MEICAgent/
 ├── CLAUDE.md                        # Agent operational brain (loaded every loop iteration)
 ├── config.example.json              # Config template — copy to config.json
-├── db.py                            # SQLite CLI helper
-├── notify.py                        # SendGrid email + structured log CLI helper
-├── dashboard.py                     # Local browser dashboard (port 5050)
-├── paper_trading.py                 # Paper trading simulation helpers (slippage, stop checks, EOD settlement)
 ├── .mcp.json                        # MCP server definition (tastytrade) — loaded by Claude Code
+├── src/
+│   ├── db.py                        # SQLite CLI helper
+│   ├── notify.py                    # SendGrid email + structured log CLI helper
+│   ├── dashboard.py                 # Local browser dashboard (port 5050)
+│   ├── paper_trading.py             # Paper trading simulation helpers (slippage, stop checks, EOD settlement)
+│   └── watchdog.py                  # Process health monitor
 ├── docs/
 │   ├── setup.md                     # Installation and configuration
 │   ├── operating.md                 # Running and monitoring the agent

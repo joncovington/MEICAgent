@@ -46,7 +46,7 @@ except ImportError:
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 _DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "meic_trades.db")
-_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "agent.log")
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "agent.log")
 
 
 def _connect() -> sqlite3.Connection:

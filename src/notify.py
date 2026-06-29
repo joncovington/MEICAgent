@@ -23,8 +23,9 @@ except ImportError:
     def _get_secret(name: str) -> str | None:
         return os.environ.get(_ENV_VAR_MAP.get(name, ""))
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-_LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+_ROOT = os.path.dirname(os.path.dirname(__file__))
+_CONFIG_PATH = os.path.join(_ROOT, "config.json")
+_LOG_DIR = os.path.join(_ROOT, "logs")
 _LOG_PATH = os.path.join(_LOG_DIR, "agent.log")
 
 

@@ -5,7 +5,7 @@ Start the full MEICAgent session: watchdog, dashboard, and agent loop.
 Launch the watchdog as a hidden background process:
 
 ```bash
-Start-Process python -ArgumentList 'watchdog.py' -WorkingDirectory $PWD -WindowStyle Hidden
+Start-Process python -ArgumentList 'src\watchdog.py' -WorkingDirectory $PWD -WindowStyle Hidden
 ```
 
 ## Step 2 — Dashboard
@@ -16,10 +16,10 @@ Check if dashboard is already running:
 python -c "import socket; s=socket.socket(); r=s.connect_ex(('127.0.0.1',5050)); s.close(); print('running' if r==0 else 'not_running')"
 ```
 
-If `not_running`: launch dashboard as a hidden background process. `dashboard.py` opens the browser automatically on startup — do not open it again.
+If `not_running`: launch dashboard as a hidden background process. `src\dashboard.py` opens the browser automatically on startup — do not open it again.
 
 ```bash
-Start-Process python -ArgumentList 'dashboard.py' -WorkingDirectory $PWD -WindowStyle Hidden
+Start-Process python -ArgumentList 'src\dashboard.py' -WorkingDirectory $PWD -WindowStyle Hidden
 ```
 
 If `running`: open the browser.

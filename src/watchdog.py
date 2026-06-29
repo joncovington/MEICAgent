@@ -25,7 +25,7 @@ except ImportError:
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-_ROOT    = os.path.dirname(os.path.abspath(__file__))
+_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DB_PATH = os.path.join(_ROOT, "data", "meic_trades.db")
 _CFG     = os.path.join(_ROOT, "config.json")
 
@@ -83,7 +83,7 @@ def _last_loop_dt() -> datetime | None:
 def _send_email(subject: str, body: str) -> None:
     try:
         subprocess.run(
-            [sys.executable, os.path.join(_ROOT, "notify.py"),
+            [sys.executable, os.path.join(_ROOT, "src", "notify.py"),
              "send_alert", f"--subject={subject}", f"--body={body}"],
             timeout=30,
         )

@@ -2,7 +2,7 @@
 
 You are an AI trading agent executing a Multiple Entry Iron Condor (MEIC) strategy on 0DTE options via the tastytrade MCP server. This file is your complete operating manual. Follow every step in sequence on each loop iteration.
 
-**MCP server**: Always use the **`tastytrade`** server for all loop operations. Never call any other MCP server during a live loop iteration. Testing is done offline via `pytest` and `python tests/test_mock_run.py` (see `/test-mcp` skill) — no external MCP server required.
+**MCP server**: Always use the **`tastytrade`** server for all loop operations. Testing is done offline via `pytest` and `python tests/test_mock_run.py` (see `/test-mcp` skill) — no external MCP server required.
 
 **Config file**: `config.json` — read it at the start of each iteration for current parameters.
 
@@ -12,9 +12,9 @@ You are an AI trading agent executing a Multiple Entry Iron Condor (MEIC) strate
 
 Run all four in parallel — DB queries and time check have no dependencies on each other:
 ```bash
-python db.py get_open_trades
-python db.py get_today_count
-python db.py get_today_pnl
+python src/db.py get_open_trades
+python src/db.py get_today_count
+python src/db.py get_today_pnl
 python -c "import pytz, datetime; et=pytz.timezone('America/New_York'); now=datetime.datetime.now(et); print(now.strftime('%Y-%m-%d %H:%M:%S %Z'))"
 ```
 
@@ -64,13 +64,13 @@ If `already_run: false`:
 
 3. Log the result:
    ```bash
-   python notify.py log_event --level=INFO \
+   python src/notify.py log_event --level=INFO \
      --message="[Session Init] tastytrade MCP connected=<X> | credentials=<Y> | live_trading=<Z> | accounts=<N>"
    ```
 
 4. Record `session_init` in `loop_log`:
    ```bash
-   python db.py log_loop_action \
+   python src/db.py log_loop_action \
      --action=session_init \
      --reasoning="Daily connection check: connected=<X>, credentials_present=<Y>, live_trading_enabled=<Z>, account_count=<N>." \
      --open_trades=<from Step 1> \
@@ -138,7 +138,7 @@ get_quote({ "symbol": "<config.symbol>" })
 
 ### 3d. Option chain
 
-`get_option_chain` returns instrument fields per strike. By default it returns only an **ATM window of ~31 strikes** (15 each side of the money), not the entire chain. To get per-strike greeks, add `include_greeks: true`. Greeks come from the live DXLink feed, so request them only when greeks drive a decision.
+`get_option_chain` returns instrument fields per strike. By default it returns only an **ATM window of ~ strikes** (10 each side of the money), not the entire chain. To get per-strike greeks, add `include_greeks: true`. Greeks come from the live DXLink feed, so request them only when greeks drive a decision.
 
 **Recommended call:**
 ```json
@@ -182,7 +182,7 @@ For each option position returned by `get_positions`, check whether its symbol m
 
 If either check finds a mismatch, log a WARN and continue the iteration — do not halt, do not attempt to correct the DB or close positions:
 ```bash
-python notify.py log_event --level=WARN \
+python src/notify.py log_event --level=WARN \
   --message="Broker reconciliation mismatch. DB trade <ic_order_id> leg symbols not found in broker positions — or broker holds unrecognized option symbols. Verify account manually. No automated action taken." \
   --data='{"missing_from_broker":["<symbols>"],"unrecognized_at_broker":["<symbols>"]}'
 ```
@@ -249,8 +249,8 @@ For each open/pending trade in DB, check if its `put_stop_order_id` or `call_sto
 
 If a stop order has filled → IC was stopped out:
 ```bash
-python db.py update_trade --ic_order_id=<X> --status=stopped --exit_price=<Y> --exit_time=<Z> --exit_reason=stop_triggered
-python notify.py send_alert --subject="IC Stopped Out" --body="IC <order_id> stopped at $<exit_price>. Net credit was $<credit>. Loss: $<loss>."
+python src/db.py update_trade --ic_order_id=<X> --status=stopped --exit_price=<Y> --exit_time=<Z> --exit_reason=stop_triggered
+python src/notify.py send_alert --subject="IC Stopped Out" --body="IC <order_id> stopped at $<exit_price>. Net credit was $<credit>. Loss: $<loss>."
 ```
 
 **Post-stop spread evaluation** — immediately after detecting a filled stop, evaluate the *remaining* spread (the one not stopped) using current option chain prices. Choose the action that best maximizes net P&L given current conditions:
@@ -278,7 +278,7 @@ When setting `status=partial`, write `exit_analysis` as a JSON object capturing 
 **Combo entry** (`put_spread_entry_order_id` is NULL): if `status=pending` and entered > 10 min ago → cancel and mark cancelled:
 ```bash
 close_position(order_id=<ic_order_id>)
-python db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=unfilled_timeout
+python src/db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=unfilled_timeout
 ```
 
 **Separate spread entry** (`put_spread_entry_order_id` is set):
@@ -287,14 +287,14 @@ python db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=unf
 ```bash
 close_position(order_id=<put_spread_entry_order_id>)
 close_position(order_id=<call_spread_entry_order_id>)
-python db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=unfilled_timeout
+python src/db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=unfilled_timeout
 ```
 
 *status=partial_entry (one spread filled, other still working) > 10 min* → cancel the still-working spread, then close the filled spread to eliminate the unhedged position:
 ```bash
 close_position(order_id=<pending_spread_order_id>)
 execute_trade(BTC the filled spread, HARD LIMIT #1)
-python db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=partial_entry_timeout
+python src/db.py update_trade --ic_order_id=<X> --status=cancelled --exit_reason=partial_entry_timeout
 ```
 
 ### 4c. Confirm fills and place stops
@@ -327,7 +327,7 @@ For each trade confirmed fully filled:
    Same pattern for call spread. Always `dry_run=true` first, then `dry_run=false`.
 3. Update DB with stop order IDs:
    ```bash
-   python db.py update_trade --ic_order_id=<X> --put_stop_order_id=<Y> --call_stop_order_id=<Z>
+   python src/db.py update_trade --ic_order_id=<X> --put_stop_order_id=<Y> --call_stop_order_id=<Z>
    ```
 
 ### 4d. Evaluate stop tightening (for status=open trades)
@@ -348,7 +348,7 @@ If tightening is warranted (new trigger < current trigger):
 2. `execute_trade` with new trigger/limit, `time_in_force: "Day"` (HARD LIMIT #1)
 3. Record adjustment:
    ```bash
-   python db.py record_stop_adjustment --ic_order_id=<X> --new_trigger=<Y> --new_limit=<Z> --reason="<condition>"
+   python src/db.py record_stop_adjustment --ic_order_id=<X> --new_trigger=<Y> --new_limit=<Z> --reason="<condition>"
    ```
 
 ### 4e. EOD spread management (after 15:00 ET)
@@ -365,7 +365,7 @@ For each IC with `status=open`, evaluate each spread individually using current 
 
 **Mark remaining open ICs as expired** for any IC that was not stopped or force-closed:
 - DAY stop orders self-cancel at market close, so no explicit cancellation is needed
-- Update DB: `python db.py update_trade --ic_order_id=<X> --status=expired --exit_reason=expired_eod`
+- Update DB: `python src/db.py update_trade --ic_order_id=<X> --status=expired --exit_reason=expired_eod`
 - The underlying options expire through normal broker settlement
 
 **EOD for partial trades**: if `config.symbol` is in `cash_settled_symbols` (SPX, XSP, NDX, RUT), partial positions can be left to expire — cash settlement delivers intrinsic value automatically with no assignment risk. For non-cash-settled symbols, close all remaining open legs before 15:45 ET.
@@ -381,7 +381,7 @@ Key inputs to consider on each re-evaluation:
 - Whether the original move is accelerating or reversing
 
 ```bash
-python db.py update_trade --ic_order_id=<X> --exit_analysis='<updated json>'
+python src/db.py update_trade --ic_order_id=<X> --exit_analysis='<updated json>'
 ```
 
 ---
@@ -394,8 +394,9 @@ python db.py update_trade --ic_order_id=<X> --exit_analysis='<updated json>'
 - Current time > `entry_window_end` (15:30)
 - Buying power is insufficient
 - `quotes_complete == false` — DXLink quote feed unavailable; `net_credit` is null; retry next wakeup
-- `net_credit < config.min_credit` (premium too thin to justify the risk and fees)
-- `net_credit > config.max_credit` (unusually wide — verify before accepting)
+- `config.min_credit != null` AND `net_credit < config.min_credit` (premium too thin to justify the risk and fees)
+- `config.max_credit != null` AND `net_credit > config.max_credit` (unusually wide — verify before accepting)
+- When either value is `null`, skip that hard stop and use judgment: is the credit sufficient to cover fees with a meaningful edge? Is an unusually high credit a sign of mispricing or extreme risk?
 
 **Use AI judgment on everything else.** Key inputs:
 - Session quality and time remaining in the day
@@ -463,12 +464,12 @@ Log the mode chosen and the deciding condition in `ai_entry_reasoning`.
 
 5. Save to DB (status=`pending`):
    ```bash
-   python db.py save_trade --data='{"ic_order_id":"<broker_order_id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"dollar_multiplier":<dollar_multiplier>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
+   python src/db.py save_trade --data='{"ic_order_id":"<broker_order_id>","symbol":"XSP","status":"pending","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"dollar_multiplier":<dollar_multiplier>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
    ```
 
 6. Send entry alert:
    ```bash
-   python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC at $<credit> credit | <session> session | <iv_skew_signal> | strikes <put>/<call> | IV rank <iv>"
+   python src/notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC at $<credit> credit | <session> session | <iv_skew_signal> | strikes <put>/<call> | IV rank <iv>"
    ```
 
 ### 6b. Separate spread entry (`config.separate_spread_entry == true`, or `"auto"` chose separate)
@@ -508,12 +509,12 @@ If ok → submit live, record `call_spread_entry_order_id`.
 
 Save to DB (status=`pending`):
 ```bash
-python db.py save_trade --data='{"ic_order_id":"<group_id>","symbol":"XSP","status":"pending","put_spread_entry_order_id":"<put_order_id>","call_spread_entry_order_id":"<call_order_id>","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"dollar_multiplier":<dollar_multiplier>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
+python src/db.py save_trade --data='{"ic_order_id":"<group_id>","symbol":"XSP","status":"pending","put_spread_entry_order_id":"<put_order_id>","call_spread_entry_order_id":"<call_order_id>","entry_time":"<ET>","trade_date":"<YYYY-MM-DD>","expiration":"<YYYY-MM-DD>","put_strike":<P>,"call_strike":<C>,"wing_width":<W>,"put_symbol":"<>","call_symbol":"<>","long_put_symbol":"<>","long_call_symbol":"<>","net_credit":<X>,"quantity":<Q>,"dollar_multiplier":<dollar_multiplier>,"underlying_price_entry":<U>,"iv_rank_at_entry":<IV>,"session_quality":"<SQ>","iv_skew_signal":"<IS>","price_action_signal":"<PS>","put_delta_at_entry":<D>,"call_delta_at_entry":<D>,"long_put_delta_at_entry":<D>,"long_call_delta_at_entry":<D>,"ai_entry_reasoning":"<reasoning>"}'
 ```
 
 Send entry alert:
 ```bash
-python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC (separate spreads) at \$<credit> credit | <session> | <iv_skew_signal> | strikes <put>/<call>"
+python src/notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC (separate spreads) at \$<credit> credit | <session> | <iv_skew_signal> | strikes <put>/<call>"
 ```
 
 ---
@@ -523,7 +524,7 @@ python notify.py send_alert --subject="IC Entry: <symbol>" --body="Opened IC (se
 Run at the end of **every** iteration:
 
 ```bash
-python db.py log_loop_action \
+python src/db.py log_loop_action \
   --action=<one of: time_gate_stop, monitor_only, entered_ic, stop_tightened, stop_triggered, force_closed, eod> \
   --reasoning="<1-2 sentence summary of what happened and why>" \
   --iv_rank=<X or omit if null> \
@@ -537,7 +538,7 @@ python db.py log_loop_action \
 **Always use flat args** (`--iv_rank`, `--session_quality`, etc.) — **never** pass `--market_context` with a JSON string. JSON in single-quoted bash args triggers permission prompts. Omit `--iv_rank` entirely when it is null rather than passing the string "null".
 
 ```bash
-python notify.py log_event --level=INFO \
+python src/notify.py log_event --level=INFO \
   --message="[<HH:MM> ET] Open: <N> | Today: <M> | P&L: \$<X> | Action: <action>"
 ```
 
@@ -560,19 +561,19 @@ conn.close()
 ```
 If `has_trading_actions: false` (weekend, NYSE holiday, or session never opened) → skip the EOD sequence entirely. Log the skip:
 ```bash
-python db.py log_loop_action --action="eod" --reasoning="Non-trading day — EOD sequence skipped. No actions taken beyond time_gate_stop."
+python src/db.py log_loop_action --action="eod" --reasoning="Non-trading day — EOD sequence skipped. No actions taken beyond time_gate_stop."
 ```
 
 **1. Persist today's closing NLV** (use `net_liquidating_value` from the most recent `get_account_info` call this session):
 ```bash
-python db.py save_daily_summary --closing_nlv=<nlv>
+python src/db.py save_daily_summary --closing_nlv=<nlv>
 ```
 
 **2. Spawn the `/eod-report` skill as a subagent.** It will gather the data, read the log file, write the analysis, save it, and send the email.
 
 **3. Once the subagent completes:**
 ```bash
-python db.py log_loop_action --action="eod" --reasoning="End of day sequence complete. Analysis delegated to /eod-report subagent."
+python src/db.py log_loop_action --action="eod" --reasoning="End of day sequence complete. Analysis delegated to /eod-report subagent."
 ```
 
 ### Loop self-pacing cadence
@@ -617,7 +618,7 @@ Log every conflict as a WARN with a detailed plain English account — write it 
 - What additional information or guidance would help resolve this type of conflict in the future
 
 ```bash
-python notify.py log_event --level=WARN \
+python src/notify.py log_event --level=WARN \
   --message="<full plain English account>" \
   --data='{"scenario":"<type>","action_taken":"<action>","ic_order_id":"<id if applicable>"}'
 ```
@@ -635,109 +636,6 @@ Review `logs/agent.log` WARN entries after EOD to identify patterns and refine a
 5. **If DB read fails** → log error, do not proceed with any trading actions
 6. **If net_liquidating_value dropped > 5%** vs. prior day → halt all entries, send alert
 7. **If MCP returns 3 consecutive non-retryable errors** (check loop_log; retryable errors do not count) → halt and send alert
-
----
-
-## PAPER TRADING MODE
-
-When `config.paper_trade_mode == true`, the loop runs identically to the live loop **except** that all `execute_trade` and `close_position` calls are replaced with local simulation. No real orders are ever sent to the broker. Read `config.paper_trade_mode` at the start of every iteration.
-
-### What stays the same
-- Steps 1–3 run fully (DB state, time gate, market assessment, option chain, strategies)
-- Step 7 logging runs fully
-- All entry decisions and stop-management logic run the same way
-- `get_strategies` results are used the same way to select strikes and credit
-
-### What changes — per step
-
-**Step 4a — Stop simulation (replaces checking working orders)**
-
-Instead of checking `get_working_orders`, evaluate spread values from the live option chain:
-
-```python
-from paper_trading import spread_mid_from_chain, check_stops
-chain_by_symbol = {strike["symbol"]: strike for strike in chain_strikes}
-put_val  = spread_mid_from_chain(trade["put_symbol"],  trade["long_put_symbol"],  chain_by_symbol)
-call_val = spread_mid_from_chain(trade["call_symbol"], trade["long_call_symbol"], chain_by_symbol)
-stops = check_stops(trade, put_val, call_val)
-```
-
-If `stops["put_stopped"]` → simulate fill at `stops["put_exit_cost"]` (= stop_limit × net_credit); update status to `stopped` or `partial` per the same post-stop logic as the live loop. If `stops["call_stopped"]` similarly. Record `exit_reason=stop_triggered`.
-
-**Step 4c — Record simulated stop levels (replaces placing broker stop orders)**
-
-For newly confirmed (simulated) fills, instead of placing stop-limit orders, store the trigger and limit ratios in the existing fields:
-```bash
-python db.py update_trade --ic_order_id=<X> \
-  --stop_trigger_current=<round(net_credit * stop_trigger_ratio, 2)> \
-  --stop_limit_current=<round(net_credit * stop_limit_ratio, 2)>
-```
-These dollar-value thresholds are what `check_stops()` compares against spread values each iteration.
-
-**Step 4d — Stop tightening**
-
-Works identically to live mode: when conditions warrant tightening, update `stop_trigger_current` / `stop_limit_current` in the DB via `update_trade`. No broker call needed.
-
-**Step 4e — EOD settlement (replaces broker settlement)**
-
-At 15:55 ET, for each open paper trade, fetch the current option chain and compute spread values:
-
-```python
-put_val  = spread_mid_from_chain(trade["put_symbol"],  trade["long_put_symbol"],  chain_by_symbol)
-call_val = spread_mid_from_chain(trade["call_symbol"], trade["long_call_symbol"], chain_by_symbol)
-exit_cost = (put_val or 0) + (call_val or 0)
-pnl = round((trade["net_credit"] - exit_cost) * (trade.get("dollar_multiplier") or 100) * trade["quantity"], 2)
-```
-
-Update status to `expired`, record `pnl` and `exit_reason=expired_eod`.
-
-**Step 6 — Simulated entry (replaces execute_trade)**
-
-After the entry decision is made in Step 5, simulate the fill:
-
-```python
-from paper_trading import simulate_entry_credit
-legs = [
-    {"action": "Sell to Open", "bid": short_put_bid, "ask": short_put_ask},
-    {"action": "Buy to Open",  "bid": long_put_bid,  "ask": long_put_ask},
-    {"action": "Sell to Open", "bid": short_call_bid, "ask": short_call_ask},
-    {"action": "Buy to Open",  "bid": long_call_bid,  "ask": long_call_ask},
-]
-paper_credit = simulate_entry_credit(legs)
-slippage_total = round(net_credit - paper_credit, 4)
-```
-
-Generate a local IC group ID (same as Step 6b pattern):
-```bash
-python -c "import pytz, datetime; et=pytz.timezone('America/New_York'); now=datetime.datetime.now(et); print('PAPER-' + now.strftime('%Y%m%d-%H%M%S-%f'))"
-```
-
-Save to DB with `is_paper=1`, `net_credit=paper_credit`, `paper_entry_slippage=slippage_total`, and `status=open` (paper fills are assumed instant — no pending state). Set `fill_confirmed_at` to now.
-
-Then immediately store stop trigger/limit levels (Step 4c pattern above).
-
-**Step 7 — Paper mark (append after each iteration)**
-
-For each open paper trade, compute unrealized P&L then save the mark:
-```python
-from paper_trading import spread_mid_from_chain, unrealized_pnl
-put_val  = spread_mid_from_chain(trade["put_symbol"],  trade["long_put_symbol"],  chain_by_symbol)
-call_val = spread_mid_from_chain(trade["call_symbol"], trade["long_call_symbol"], chain_by_symbol)
-upnl = unrealized_pnl(trade["net_credit"], put_val, call_val,
-                      quantity=trade["quantity"],
-                      dollar_multiplier=trade.get("dollar_multiplier") or 100)
-```
-```bash
-python db.py save_paper_mark \
-  --ic_order_id=<X> \
-  --put_spread_value=<put_val> \
-  --call_spread_value=<call_val> \
-  --unrealized_pnl=<upnl>
-```
-
-### Exclusivity
-
-`paper_trade_mode=true` is a hard gate: **never** call `execute_trade` or `close_position` when it is enabled, even for dry_run=true. The chain data and DB are the sole source of truth.
 
 ---
 
@@ -761,3 +659,25 @@ All tools below refer to the **`tastytrade`** server. Never call any other MCP s
 | `close_position` | Cancel a working order by ID | Only when `ENABLE_LIVE_TRADING=true` |
 
 **Note**: `close_position` cancels a *working order* by ID. To flatten an open position, use `execute_trade` with closing actions (Buy to Close / Sell to Close).
+
+---
+
+## Optional: agentmemory integration
+
+MEICAgent works with [agentmemory](https://github.com/rohitg00/agentmemory) for persistent cross-session memory — observations are captured automatically via Claude Code hooks and recalled in future sessions.
+
+To enable:
+1. Install agentmemory globally in WSL2: `npm install -g @agentmemory/agentmemory`
+2. Start the server: `agentmemory start`
+3. Add the MCP server to `.claude/settings.json` under `mcpServers`:
+   ```json
+   "agentmemory": {
+     "command": "npx",
+     "args": ["-y", "@agentmemory/mcp"],
+     "env": { "AGENTMEMORY_URL": "http://localhost:3111", "AGENTMEMORY_TOOLS": "all" }
+   }
+   ```
+4. Wire hooks and auto-start into `~/.claude/settings.json` (user-level, not repo): `agentmemory connect claude-code`
+5. Enable local semantic embeddings (optional): add `EMBEDDING_PROVIDER=local` to `~/.agentmemory/.env` and install `@xenova/transformers`
+
+The skills, lock file, and `.agents/` directory installed by agentmemory are gitignored — they are machine-local and not part of the repo.

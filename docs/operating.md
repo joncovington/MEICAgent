@@ -62,7 +62,7 @@ A local browser dashboard provides a live view of the trading session and histor
 Or start it directly:
 
 ```bash
-python dashboard.py
+python src/dashboard.py
 ```
 
 Opens at `http://localhost:5050` and auto-refreshes every 30 seconds.

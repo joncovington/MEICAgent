@@ -2,7 +2,7 @@ Produce the end-of-day analysis report for the MEICAgent MEIC trading session.
 
 1. Gather today's trade data:
 ```bash
-python db.py get_eod_summary
+python src/db.py get_eod_summary
 ```
 
 2. Read `logs/agent.log` and filter to today's entries, paying particular attention to any WARN level entries which capture conflicts and the conservative defaults applied during the session.
@@ -21,6 +21,6 @@ python db.py get_eod_summary
 
 4. Save the analysis and send the report:
 ```bash
-python db.py save_daily_summary --date="<YYYY-MM-DD>" --summary="<your full analysis>"
-python notify.py send_eod_email
+python src/db.py save_daily_summary --date="<YYYY-MM-DD>" --summary="<your full analysis>"
+python src/notify.py send_eod_email
 ```

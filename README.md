@@ -28,7 +28,7 @@ pip install keyring pytz pytest pytest-asyncio
 cp config.example.json config.json   # then edit config.json
 
 # 3. Initialize the database
-python db.py init_db
+python src/db.py init_db
 
 # 4. Open in Claude Code and start the session (before 9:30 ET)
 /meic-start

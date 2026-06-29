@@ -5,6 +5,7 @@ config.json
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/stream_store/
 
 # Agent logs
 logs/*.log
@@ -23,3 +24,11 @@ __pycache__/
 
 # Local Claude Code overrides (machine-specific enablement flags)
 .claude/settings.local.json
+
+# MCP server config (machine-local; includes agentmemory which is optional)
+.mcp.json
+
+# Auto-installed Claude Code skills and agent plugins (machine-local)
+.claude/skills/
+.agents/
+skills-lock.json

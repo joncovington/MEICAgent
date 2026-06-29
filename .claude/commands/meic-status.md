@@ -2,9 +2,9 @@ Display the current MEICAgent session status as a clear, readable summary.
 
 Run the following in parallel:
 ```bash
-python db.py get_open_trades
-python db.py get_today_count
-python db.py get_today_pnl
+python src/db.py get_open_trades
+python src/db.py get_today_count
+python src/db.py get_today_pnl
 ```
 
 Also query the last 5 loop log entries:

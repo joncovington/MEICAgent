@@ -96,7 +96,7 @@ Add this to your shell profile or container environment so it persists across se
 ### 6. Initialize the database
 
 ```bash
-python db.py init_db
+python src/db.py init_db
 ```
 
 This creates `data/meic_trades.db` (SQLite, WAL mode). Safe to run multiple times.

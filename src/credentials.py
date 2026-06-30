@@ -1,0 +1,42 @@
+"""Keyring-backed credential storage for tastytrade OAuth."""
+
+from __future__ import annotations
+
+import keyring
+import keyring.errors
+
+SERVICE_NAME = "tastytrade-mcp"
+
+CLIENT_SECRET = "client_secret"
+REFRESH_TOKEN = "refresh_token"
+ACCOUNT_NUMBER = "account_number"
+
+REQUIRED_SECRETS = (CLIENT_SECRET, REFRESH_TOKEN)
+ALL_SECRETS = (CLIENT_SECRET, REFRESH_TOKEN, ACCOUNT_NUMBER)
+
+_PREFIX = "production"
+
+
+class CredentialError(RuntimeError):
+    pass
+
+
+def _entry(key: str) -> str:
+    return f"{_PREFIX}:{key}"
+
+
+def get_secret(key: str) -> str | None:
+    try:
+        return keyring.get_password(SERVICE_NAME, _entry(key))
+    except keyring.errors.NoKeyringError as exc:
+        raise CredentialError("No keyring backend available.") from exc
+    except keyring.errors.KeyringError as exc:
+        raise CredentialError(f"Keyring read failed: {exc}") from exc
+
+
+def secrets_present() -> bool:
+    return all(get_secret(k) for k in REQUIRED_SECRETS)
+
+
+def missing_secrets() -> list[str]:
+    return [k for k in REQUIRED_SECRETS if not get_secret(k)]

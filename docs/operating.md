@@ -2,20 +2,15 @@
 
 ## Pre-market session setup
 
-Run `/meic-start` before 9:30 ET — it launches the watchdog, dashboard, and agent loop in sequence:
+Run `/meic-start` before 9:30 ET — it launches the dashboard and agent loop in sequence:
 
 ```
 /meic-start
 ```
 
-This launches the watchdog and dashboard as background processes, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 09:45 ET) or after 15:30 ET, so starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** (Step 2.5) to verify the tastytrade MCP is live before any market assessment begins.
+This launches the dashboard as a background process, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 09:45 ET) or after 15:30 ET, so starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** to verify the tastytrade MCP is live before any market assessment begins.
 
 To start components individually instead:
-
-**Watchdog** — alerts via email and Windows toast if the loop stops running:
-```
-/watchdog
-```
 
 **Dashboard** — opens the browser at `http://localhost:5050`, auto-refreshes every 30 s:
 ```
@@ -71,10 +66,6 @@ Opens at `http://localhost:5050` and auto-refreshes every 30 seconds.
 - Multi-period stats grid — Net P&L, total trades, wins, losses, and W/L ratio across today / this week / this month / this year / all-time (live trades only)
 - Trades table — each IC with entry time, strikes, wing width, per-spread credits, per-spread stop status badges (e.g. `STOPPED 11:21`), and P&L
 
-**Paper view**
-- Same stats grid and trades table as Today, but filtered to paper trades (`is_paper = 1`)
-- Includes slippage column showing simulated entry cost vs. mid-market credit
-
 **History view**
 - NLV trend chart — account value over all days where the EOD sequence has run
 - Session win rate breakdown
@@ -111,7 +102,6 @@ After 15:55 ET the agent automatically spawns the `/eod-report` skill, which:
 1. Reads today's trades and loop log
 2. Writes a plain English analysis of entry quality, stop management, and what worked or didn't
 3. Saves the analysis to the `daily_summary` table
-4. Sends an EOD email via SendGrid
 
 You can also trigger it manually at any time:
 

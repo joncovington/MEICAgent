@@ -76,11 +76,10 @@ def _today_stats(conn: sqlite3.Connection, today: str) -> dict:
     r = _one(conn, """
         SELECT COALESCE(SUM(pnl), 0)                                    AS net_pnl,
                COUNT(*)                                                  AS total_trades,
-               SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)                AS wins,
-               SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses
+               SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END)        AS wins,
+               SUM(CASE WHEN status = 'stopped' THEN 1 ELSE 0 END)        AS losses
         FROM ic_trades
         WHERE trade_date = ?
-          AND (is_paper = 0 OR is_paper IS NULL)
           AND status NOT IN ('cancelled', 'pending', 'partial_entry')
     """, (today,)) or {}
     result = {
@@ -242,7 +241,6 @@ def _build_api_data() -> dict:
                ai_entry_reasoning, exit_analysis
         FROM ic_trades
         WHERE trade_date = ?
-          AND (is_paper = 0 OR is_paper IS NULL)
         ORDER BY entry_time
     """, (today,))
 
@@ -272,11 +270,10 @@ def _build_api_data() -> dict:
     by_session = _rows(conn, """
         SELECT session_quality,
                COUNT(*) AS total,
-               SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) AS wins,
                ROUND(AVG(pnl), 2) AS avg_pnl
         FROM ic_trades
-        WHERE (is_paper = 0 OR is_paper IS NULL)
-          AND status NOT IN ('cancelled','pending','partial_entry')
+        WHERE status NOT IN ('cancelled','pending','partial_entry')
           AND session_quality IS NOT NULL
         GROUP BY session_quality
         ORDER BY total DESC
@@ -285,8 +282,7 @@ def _build_api_data() -> dict:
     by_exit = _rows(conn, """
         SELECT COALESCE(exit_reason, 'open') AS exit_reason, COUNT(*) AS count
         FROM ic_trades
-        WHERE (is_paper = 0 OR is_paper IS NULL)
-          AND status NOT IN ('cancelled','pending','partial_entry')
+        WHERE status NOT IN ('cancelled','pending','partial_entry')
         GROUP BY exit_reason
         ORDER BY count DESC
     """)
@@ -301,10 +297,9 @@ def _build_api_data() -> dict:
             END AS iv_bucket,
             COUNT(*) AS trades,
             ROUND(AVG(pnl), 2) AS avg_pnl,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins
+            SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) AS wins
         FROM ic_trades
-        WHERE (is_paper = 0 OR is_paper IS NULL)
-          AND pnl IS NOT NULL AND iv_rank_at_entry IS NOT NULL
+        WHERE pnl IS NOT NULL AND iv_rank_at_entry IS NOT NULL
           AND status NOT IN ('cancelled','pending','partial_entry')
         GROUP BY iv_bucket
         ORDER BY MIN(iv_rank_at_entry)
@@ -315,8 +310,7 @@ def _build_api_data() -> dict:
                COALESCE(SUM(fees), 0)                  AS total_fees,
                COALESCE(SUM(pnl), 0)                   AS net_pnl
         FROM ic_trades
-        WHERE (is_paper = 0 OR is_paper IS NULL)
-          AND status NOT IN ('cancelled','pending','partial_entry')
+        WHERE status NOT IN ('cancelled','pending','partial_entry')
     """) or {}
     gross = float(fee_row.get("gross_credit") or 0)
     fees  = float(fee_row.get("total_fees") or 0)

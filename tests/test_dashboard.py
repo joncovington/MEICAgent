@@ -44,8 +44,6 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     exit_time TEXT, exit_price REAL, exit_reason TEXT, exit_analysis TEXT,
     put_stop_cost REAL, call_stop_cost REAL,
     pnl REAL, fees REAL, fill_confirmed_at TEXT,
-    is_paper INTEGER DEFAULT 0,
-    paper_entry_slippage REAL,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS daily_summary (
@@ -200,14 +198,14 @@ def test_status_stopped_put_side():
         _trade(status="partial", exit_time="2026-06-20T11:21:00", exit_analysis=ea)
     )
     assert put_s["type"] == "stopped"
-    assert call_s["type"] == "expired"
+    assert call_s["type"] == "monitoring"
 
 def test_status_stopped_call_side():
     ea = json.dumps({"stopped_spread": "call"})
     put_s, call_s = dashboard._spread_statuses(
         _trade(status="partial", exit_time="2026-06-20T14:05:00", exit_analysis=ea)
     )
-    assert put_s["type"] == "expired"
+    assert put_s["type"] == "monitoring"
     assert call_s["type"] == "stopped"
 
 def test_status_stopped_time_in_label():

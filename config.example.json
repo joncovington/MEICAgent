@@ -9,27 +9,30 @@
   "entry_window_end": "15:30",
   "min_credit": 0.50,
   "max_credit": 5.00,
+  "entry_price_strategy": "mid",
+  "_entry_price_strategy_note": "mid (default): Day limit at streaming mid price; falls back to natural_bid if avg per-leg spread > mid_spread_gate or session is open_volatile/late, or if unfilled after mid_improve_wait_seconds. natural_bid: immediate fill price. ioc_step: IOC attempts above natural bid stepping down. day_improve: Day limit at natural_bid + day_improve_amount. auto: agent chooses per-iteration.",
+  "mid_improve_wait_seconds": 45,
+  "mid_spread_gate": 0.10,
+  "ioc_step_increments": [0.02, 0.01],
+  "ioc_step_wait_seconds": 10,
+  "day_improve_amount": 0.03,
+  "day_improve_wait_seconds": 60,
   "separate_spread_entry": false,
   "_separate_spread_entry_note": "Controls IC order structure. false = always 4-leg combo. true = always separate 2-leg spreads. \"auto\" = agent evaluates per-iteration: favors separate when IV rank > 0.35, session is late/open_volatile, or 2+ ICs already open; falls back to separate if combo dry_run returns warnings.",
-  "stop_order_type": "Stop",
-  "_stop_order_type_note": "Stop (default): becomes a market order when the trigger fires — guaranteed execution. Stop Limit: places a limit order after the trigger fires — price protection but risks not filling in fast markets. Must match tastytrade API values exactly.",
+  "stop_type": "spread",
+  "_stop_type_note": "spread (default): software stop monitors the IC's cost and closes the full spread when the trigger ratio is hit. single: places an exchange stop on the short leg; agent closes the long leg on fill.",
   "stop_trigger_ratio": 0.95,
   "_stop_trigger_ratio_note": "Fraction of net_credit at which the stop triggers. Default 0.95 = stop fires when spread costs 95% of the original credit received.",
   "stop_limit_ratio": 1.00,
-  "_stop_limit_ratio_note": "Only used when stop_order_type is Stop Limit. Limit price as a fraction of net_credit placed after the trigger fires.",
+  "_stop_limit_ratio_note": "Only used in spread mode. Limit price as a fraction of net_credit for the closing order.",
   "max_stop_adjustments_per_ic": 3,
   "cash_settled_symbols": ["SPX", "XSP", "NDX", "RUT"],
-  "sandbox": true,
+  "enable_live_trading": false,
+  "_enable_live_trading_note": "Set to true to allow execute_trade/adjust_order/close_position to submit real orders. Requires tastytrade OAuth credentials in the OS keyring (via tastytrade-mcp secrets set).",
   "loop_interval_minutes": 5,
   "nyse_holidays_2026": [
     "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
     "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
     "2026-11-26", "2026-12-25"
-  ],
-  "email": {
-    "enabled": false,
-    "from": "you+MEICAgent@example.com",
-    "to": "you@example.com",
-    "_note": "SendGrid API key is stored via the OS keyring (Windows Credential Manager, macOS Keychain, Linux Secret Service) or the MEICAGENT_SENDGRID_KEY environment variable. Run: python -c \"import keyring; keyring.set_password('meicagent', 'sendgrid_api_key', 'YOUR_KEY')\" to store via keyring."
-  }
+  ]
 }

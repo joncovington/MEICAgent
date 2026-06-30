@@ -1,4 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "meicagent"
+version = "0.1.0"
+description = "Autonomous 0DTE MEIC options trading agent"
+requires-python = ">=3.11"
+dependencies = [
+    "tastytrade>=12",
+    "keyring>=24",
+    "python-dotenv>=1.0",
+    "pytz>=2024",
+    "flask>=3",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths    = ["tests"]
-pythonpath   = ["tests"]
+pythonpath   = ["tests", "src"]

@@ -224,7 +224,7 @@ def cmd_get_eod_summary(_args):
     gross_pnl = sum((t["pnl"] or 0) for t in trades)
     fees = sum((t["fees"] or 0) for t in trades)
     net_pnl = gross_pnl - fees
-    wins = sum(1 for t in trades if (t["pnl"] or 0) > 0)
+    wins = sum(1 for t in trades if t["status"] == "expired")
     win_rate = round(wins / filled * 100, 1) if filled else None
     iv_values = [t["iv_rank_at_entry"] for t in trades if t["iv_rank_at_entry"] is not None]
     avg_iv = round(sum(iv_values) / len(iv_values), 1) if iv_values else None

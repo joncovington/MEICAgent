@@ -10,7 +10,7 @@ Each IC consists of four legs:
 - **Short put** + **long put** (put spread) — below the market
 - **Short call** + **long call** (call spread) — above the market
 
-Short strikes are targeted near `delta_target` (default 0.15) on each side. Wing width is selected dynamically per entry from `wing_width_candidates`.
+Short strikes begin from `delta_target` (default 0.15) as a starting suggestion. The agent then applies OTM distance guardrails (see below) and may move strikes farther OTM if the guardrail requires it. Wing width is selected dynamically per entry from `wing_width_candidates`.
 
 ---
 
@@ -41,6 +41,38 @@ Any width where `width × dollar_multiplier > available buying power` is elimina
 
 ---
 
+## Short strike placement and OTM guardrails
+
+`delta_target` is a suggestion, not a hard requirement. After the delta-based strikes are returned, the agent computes the actual OTM distance for each short strike and checks it against context-aware minimums:
+
+| Condition | Minimum call OTM | Minimum put OTM |
+|---|---|---|
+| Bearish IV skew | 4.5 pts | 4.0 pts |
+| Bullish IV skew | 4.0 pts | 4.5 pts |
+| `open_volatile` session | 4.0 pts | 4.0 pts |
+| Default | 3.5 pts | 3.5 pts |
+
+When multiple conditions apply, the largest applicable minimum wins per side. If a delta-targeted strike is closer than its floor, the agent finds the nearest chain strike at or beyond the minimum distance and uses that instead — accepting a lower delta in exchange for more OTM buffer. The adjustment is noted in `ai_entry_reasoning`.
+
+---
+
+## Entry price strategy
+
+By default the agent submits at the **natural bid** — the price buyers are actively bidding for the IC combo — which is always within the CBOE Complex Order Book's acceptable price range. Submitting at mid is consistently rejected ("Complex_order_outside_acceptable_price_range") because the DXLink quote snapshot lags the exchange's real-time NBBO.
+
+Two optional strategies can attempt to capture price improvement above the natural bid. Set `entry_price_strategy` in `config.json`:
+
+| Value | Behavior |
+|---|---|
+| `"natural_bid"` | Always submit at natural bid. Default and safest. |
+| `"ioc_step"` | Try natural bid + each increment in `ioc_step_increments` as IOC orders, then fall back to natural bid as a Day order. |
+| `"day_improve"` | Submit a Day limit at natural bid + `day_improve_amount`, wait `day_improve_wait_seconds`, cancel-replace at natural bid if unfilled. |
+| `"auto"` | Agent chooses per-iteration: `ioc_step` in volatile/late sessions, `day_improve` in calm midday, `natural_bid` when time is short or credit is thin. |
+
+**Note**: Whether prices even slightly above natural bid pass the CBOE COB check is empirically unknown. An `ioc_step` attempt that would normally just sit unfilled may instead be rejected outright — the agent treats this the same as a miss and steps to the next increment. A few live sessions with `ioc_step` enabled will confirm whether improvement is achievable.
+
+---
+
 ## Stop management
 
 Each IC gets two **DAY stop-limit orders** — one for the put spread, one for the call spread. Both are sized as a fraction of the full IC net credit:
@@ -66,13 +98,13 @@ Stops are tightened (never loosened) by AI judgment as conditions change. Trigge
 
 ## Post-stop evaluation
 
-When a stop fills, the agent immediately evaluates the remaining spread and chooses the action that best maximizes net P&L:
+When a stop fills, the agent evaluates the remaining spread **in the same iteration** — it does not defer to the next loop. It chooses the action that best maximizes net P&L:
 
-1. **Close the full remaining spread** — eliminates all tail risk
+1. **Close the full remaining spread** — eliminates all tail risk; best when the spread can be bought cheaply
 2. **Buy back only the short leg** — removes directional exposure, leaves the long leg open at zero cost
-3. **Leave the DAY stop working** — best when closing would add unnecessary fees with little risk benefit
+3. **Hold and monitor** — spread still has meaningful value; closing would add unnecessary fees with little risk benefit. Status is set to `partial` so the agent re-evaluates on every subsequent iteration.
 
-The agent re-evaluates partial positions on every subsequent iteration until market close.
+The agent re-evaluates all partial positions (and stopped positions with remaining open legs) on every subsequent iteration until market close.
 
 ---
 

@@ -6,13 +6,12 @@ The agent runs as a Claude Code `/loop` — on each iteration (~every 5 minutes 
 
 Supports **equity index options** (XSP, SPX, NDX, RUT) and **CME futures options** (/MES, /ES, /MNQ, /NQ). All contract-specific parameters (`instrument_type`, `dollar_multiplier`, leg symbols) are read directly from the `get_strategies` response — no hardcoding required when switching underlyings.
 
-Supports **paper trading mode** (`paper_trade_mode: true` in `config.json`) — runs the full strategy loop with simulated fills and stop checks against live option chain prices, with no real orders sent to the broker.
 
 ---
 
 ## Documentation
 
-- [Setup](docs/setup.md) — installation, configuration, SendGrid, database init, going live
+- [Setup](docs/setup.md) — installation, configuration, database init, going live
 - [Operating](docs/operating.md) — starting the loop, status, dashboard, EOD report, logs
 - [Strategy](docs/strategy.md) — MEIC structure, wing width selection, stops, post-stop evaluation, EOD handling
 
@@ -22,7 +21,7 @@ Supports **paper trading mode** (`paper_trade_mode: true` in `config.json`) — 
 
 ```bash
 # 1. Install dependencies
-pip install keyring pytz pytest pytest-asyncio
+pip install pytz pytest pytest-asyncio
 
 # 2. Configure
 cp config.example.json config.json   # then edit config.json
@@ -47,10 +46,8 @@ MEICAgent/
 ├── .mcp.json                        # MCP server definition (tastytrade) — loaded by Claude Code
 ├── src/
 │   ├── db.py                        # SQLite CLI helper
-│   ├── notify.py                    # SendGrid email + structured log CLI helper
+│   ├── notify.py                    # Structured log CLI helper
 │   ├── dashboard.py                 # Local browser dashboard (port 5050)
-│   ├── paper_trading.py             # Paper trading simulation helpers (slippage, stop checks, EOD settlement)
-│   └── watchdog.py                  # Process health monitor
 ├── docs/
 │   ├── setup.md                     # Installation and configuration
 │   ├── operating.md                 # Running and monitoring the agent
@@ -64,7 +61,6 @@ MEICAgent/
 │       ├── meic-status.md           # /meic-status skill
 │       ├── check-chain.md           # /check-chain skill — verify chain and strike selection
 │       ├── test-mcp.md              # /test-mcp skill
-│       └── watchdog.md              # /watchdog skill
 ├── data/                            # Created at first run (gitignored)
 │   └── meic_trades.db
 └── logs/                            # Created at first run (gitignored)

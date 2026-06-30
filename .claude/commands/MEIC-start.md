@@ -1,14 +1,6 @@
-Start the full MEICAgent session: watchdog, dashboard, and agent loop.
+Start the full MEICAgent session: dashboard, streamer, and agent loop.
 
-## Step 1 — Watchdog
-
-Launch the watchdog as a hidden background process:
-
-```bash
-Start-Process python -ArgumentList 'src\watchdog.py' -WorkingDirectory $PWD -WindowStyle Hidden
-```
-
-## Step 2 — Dashboard
+## Step 1 — Dashboard
 
 Check if dashboard is already running:
 
@@ -28,6 +20,20 @@ If `running`: open the browser.
 start http://localhost:5050
 ```
 
+## Step 2 — DXLink Streamer
+
+Check if the streamer is running:
+
+```bash
+python src/streamer.py --status
+```
+
+If `running` is `false`: start it as a hidden background process.
+
+```bash
+Start-Process python -ArgumentList 'src\streamer.py' -WorkingDirectory $PWD -WindowStyle Hidden
+```
+
 ## Step 3 — Agent loop
 
 Invoke the `/loop` skill with the prompt:
@@ -35,4 +41,4 @@ Invoke the `/loop` skill with the prompt:
 > Execute the next MEIC agent loop iteration following the operating instructions in CLAUDE.md.
 
 Tell the user:
-"Startup complete — watchdog running, dashboard at http://localhost:5050, agent loop started. The loop will self-pace each iteration."
+"Startup complete — dashboard at http://localhost:5050, agent loop started. The loop will self-pace each iteration."

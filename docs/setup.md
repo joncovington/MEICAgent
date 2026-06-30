@@ -6,7 +6,6 @@
 - **Claude Code** — [claude.ai/code](https://claude.ai/code)
 - **tastytrade-mcp** — [github.com/joncovington/tastytrade-mcp](https://github.com/joncovington/tastytrade-mcp)
 - **tastytrade account** — live account or developer sandbox (tastytrade does not offer paper trading; the developer sandbox is a separate environment for testing without real capital)
-- **SendGrid account** *(optional)* — free tier is sufficient; required only if `email.enabled` is set to `true` in `config.json`
 
 ---
 
@@ -30,8 +29,7 @@ cd MEICAgent
 ### 3. Install Python dependencies
 
 ```bash
-pip install keyring pytz pytest pytest-asyncio
-pip install sendgrid  # optional — only needed if email.enabled = true
+pip install pytz pytest pytest-asyncio
 ```
 
 ### 4. Configure the agent
@@ -53,47 +51,13 @@ Key fields to update in `config.json`:
 | `max_entries_per_day` | Hard cap on entries (`-1` = no cap, rely on AI + buying power) |
 | `entry_window_start` | Earliest time to enter new ICs in HH:MM ET (default `"09:45"`) |
 | `separate_spread_entry` | Order structure: `false` = 4-leg combo (default), `true` = separate 2-leg spreads, `"auto"` = agent decides per-iteration based on IV rank, session, and open IC count |
-| `paper_trade_mode` | `true` to run full strategy with simulated fills — no real orders sent |
-| `email.enabled` | `true` to send alerts via SendGrid (optional — logs are always written to `logs/agent.log` regardless) |
-| `email.from` | Verified SendGrid sender address |
-| `email.to` | Address to receive alerts |
+| `entry_price_strategy` | Limit price strategy: `"natural_bid"` = always submit at natural bid (default, safest), `"ioc_step"` = try IOC orders above natural bid then fall back, `"day_improve"` = Day limit above natural bid with cancel-replace, `"auto"` = agent decides per-iteration |
+| `ioc_step_increments` | Amounts above natural bid to attempt as IOC orders (e.g. `[0.02, 0.01]`). Used when `entry_price_strategy` is `"ioc_step"` or `"auto"` selects it |
+| `ioc_step_wait_seconds` | Seconds to wait per IOC attempt before stepping to the next increment (default `10`) |
+| `day_improve_amount` | Amount above natural bid to submit as a Day limit when using `"day_improve"` (default `0.03`) |
+| `day_improve_wait_seconds` | Seconds to wait before canceling the Day improve order and resubmitting at natural bid (default `60`) |
 
-### 5. Store your SendGrid API key *(optional)*
-
-Skip this step if you are not using email alerts (`email.enabled: false` in `config.json`).
-
-The agent resolves the API key in this order:
-1. **OS keyring** (preferred) — uses your platform's native secret store
-2. **Environment variable** fallback — `MEICAGENT_SENDGRID_KEY`
-
-| Platform | Keyring backend |
-|---|---|
-| Windows | Windows Credential Manager |
-| macOS | Keychain |
-| Linux desktop | Secret Service (gnome-keyring / kwallet) |
-| Linux headless / server | No keyring available — use the env var fallback |
-
-**To store via keyring** (Windows, macOS, Linux desktop):
-
-```bash
-python -c "import keyring; keyring.set_password('meicagent', 'sendgrid_api_key', 'YOUR_SENDGRID_KEY')"
-```
-
-To verify:
-
-```bash
-python -c "import keyring; print(keyring.get_password('meicagent', 'sendgrid_api_key'))"
-```
-
-**To use the environment variable instead** (Linux headless, Docker, CI):
-
-```bash
-export MEICAGENT_SENDGRID_KEY=YOUR_SENDGRID_KEY
-```
-
-Add this to your shell profile or container environment so it persists across sessions.
-
-### 6. Initialize the database
+### 5. Initialize the database
 
 ```bash
 python src/db.py init_db
@@ -101,7 +65,7 @@ python src/db.py init_db
 
 This creates `data/meic_trades.db` (SQLite, WAL mode). Safe to run multiple times.
 
-### 7. Configure the MCP server
+### 6. Configure the MCP server
 
 The tastytrade MCP server is defined in `.mcp.json` at the project root and enabled via `.claude/settings.local.json`. By default live trading is disabled and a buying-power buffer is applied:
 

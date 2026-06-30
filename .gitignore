@@ -1,3 +1,6 @@
+# Backups
+*.bak
+
 # Local config (copy config.example.json to config.json and customize)
 config.json
 
@@ -7,8 +10,12 @@ data/*.db-shm
 data/*.db-wal
 data/stream_store/
 
-# Agent logs
+# Streamer runtime files
+data/streamer.pid
+
+# Agent logs and EOD reports
 logs/*.log
+logs/eod-*.md
 
 # Python bytecode
 __pycache__/
@@ -32,3 +39,6 @@ __pycache__/
 .claude/skills/
 .agents/
 skills-lock.json
+
+# Temp file space
+.tmp/

@@ -7,8 +7,10 @@ import json
 import os
 import socket
 import sqlite3
+import subprocess
 import sys
 import threading
+import urllib.parse
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -363,45 +365,122 @@ def _compute_zero_gamma(series: list[dict]) -> float | None:
     return None
 
 
-def _build_gex_data() -> dict:
-    if not os.path.exists(_CACHE_DB_PATH):
-        return {"ok": False, "error": "Stream cache not found — start the streamer first"}
+_TT_CMD = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tt.py")]
 
-    symbol = _load_symbol()
-    conn = sqlite3.connect(_CACHE_DB_PATH)
-    conn.row_factory = sqlite3.Row
+# Common symbols offered in the GEX symbol picker
+GEX_SYMBOLS = ["XSP", "SPX", "SPY", "QQQ", "NDX", "IWM", "DIA"]
 
-    # Underlying price
-    tr = conn.execute("SELECT last FROM stream_trades WHERE symbol = ?", (symbol,)).fetchone()
-    spot = float(tr["last"]) if tr and tr["last"] is not None else None
 
-    # Nearest expiration
-    exp_row = conn.execute(
-        "SELECT expiration FROM stream_chain "
-        "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1"
-    ).fetchone()
-    if not exp_row:
-        conn.close()
-        return {"ok": False, "error": "No chain data — wait for streamer to load the option chain"}
-    expiration = exp_row["expiration"]
+def _fetch_chain_rest(symbol: str) -> tuple[list[dict], dict, dict]:
+    """Fetch option chain via tt.py subprocess for symbols not in the stream cache.
+    Returns (options_list, greeks_map, quotes_map).
+    """
+    try:
+        proc = subprocess.run(
+            _TT_CMD + ["get_option_chain", "--symbol", symbol,
+                       "--include_greeks", "--include_quotes",
+                       "--strike_count", "60"],
+            capture_output=True, text=True, timeout=20,
+        )
+        data = json.loads(proc.stdout)
+    except Exception as exc:
+        raise RuntimeError(f"REST chain fetch failed: {exc}") from exc
 
-    chain_rows = conn.execute(
-        "SELECT data_json FROM stream_chain WHERE expiration = ?", (expiration,)
-    ).fetchall()
+    if not data.get("ok"):
+        raise RuntimeError(data.get("error", "chain fetch returned ok=false"))
 
-    greek_rows = conn.execute("SELECT * FROM stream_greeks").fetchall()
-    greeks = {r["symbol"]: dict(r) for r in greek_rows}
+    options: list[dict] = []
+    greeks: dict[str, dict] = {}
+    quotes: dict[str, dict] = {}
 
-    quote_rows = conn.execute("SELECT * FROM stream_quotes").fetchall()
-    quotes = {r["symbol"]: dict(r) for r in quote_rows}
+    for _exp, legs in (data.get("chain") or {}).items():
+        for leg in legs:
+            sym = leg.get("streamer_symbol") or ""
+            options.append(leg)
+            if leg.get("delta") is not None:
+                greeks[sym] = {
+                    "gamma": leg.get("gamma"),
+                    "iv":    (leg.get("iv") or 0) * 100,
+                }
+            if leg.get("bid") is not None:
+                quotes[sym] = {"bid": leg["bid"], "ask": leg["ask"], "mid": leg.get("mid")}
 
-    conn.close()
+    return options, greeks, quotes
+
+
+def _build_gex_data(symbol: str | None = None) -> dict:
+    symbol = (symbol or _load_symbol()).strip().upper()
+
+    # Load stream cache if available
+    cache_conn = None
+    if os.path.exists(_CACHE_DB_PATH):
+        cache_conn = sqlite3.connect(_CACHE_DB_PATH)
+        cache_conn.row_factory = sqlite3.Row
+
+    # Underlying spot price — try cache first, then skip gracefully
+    spot: float | None = None
+    if cache_conn:
+        tr = cache_conn.execute(
+            "SELECT last FROM stream_trades WHERE symbol = ?", (symbol,)
+        ).fetchone()
+        spot = float(tr["last"]) if tr and tr["last"] is not None else None
+
+    # Check if this symbol's chain is in the cache
+    chain_rows = []
+    expiration: str | None = None
+    greeks: dict[str, dict] = {}
+    quotes: dict[str, dict] = {}
+    source = "stream_cache"
+
+    if cache_conn:
+        exp_row = cache_conn.execute(
+            "SELECT expiration FROM stream_chain "
+            "WHERE streamer_symbol LIKE ? "
+            "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1",
+            (f".{symbol}%",),
+        ).fetchone()
+        if exp_row:
+            expiration = exp_row["expiration"]
+            chain_rows = cache_conn.execute(
+                "SELECT data_json FROM stream_chain WHERE expiration = ?", (expiration,)
+            ).fetchall()
+            for r in cache_conn.execute("SELECT * FROM stream_greeks").fetchall():
+                greeks[r["symbol"]] = dict(r)
+            for r in cache_conn.execute("SELECT * FROM stream_quotes").fetchall():
+                quotes[r["symbol"]] = dict(r)
+
+    if cache_conn:
+        cache_conn.close()
+
+    # Fall back to REST fetch if symbol not in cache
+    if not chain_rows:
+        try:
+            rest_opts, greeks, quotes = _fetch_chain_rest(symbol)
+            source = "rest"
+            # Infer expiration from options
+            expirations = sorted({o.get("expiration_date", "") for o in rest_opts if o.get("expiration_date")})
+            expiration = expirations[0] if expirations else None
+            chain_rows = rest_opts  # already dicts
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    if not expiration:
+        return {"ok": False, "error": f"No chain data found for {symbol}"}
+
+    # Normalise chain_rows: accept sqlite3.Row objects or plain dicts
+    def _opt(row) -> dict:
+        if isinstance(row, dict):
+            return row
+        try:
+            return json.loads(row["data_json"])
+        except Exception:
+            return {}
 
     # Aggregate per-strike
     strikes: dict[float, dict] = {}
     for row in chain_rows:
         try:
-            opt = json.loads(row["data_json"])
+            opt = _opt(row)
         except Exception:
             continue
         strike = float(opt.get("strike_price") or 0)
@@ -414,7 +493,9 @@ def _build_gex_data() -> dict:
         g = greeks.get(sym, {})
         q = quotes.get(sym, {})
         gamma = float(g.get("gamma") or 0)
-        iv    = float(g.get("iv") or 0) * 100  # as percentage
+        raw_iv = float(g.get("iv") or 0)
+        # cache stores raw decimal (0.20); REST path stores already-pct (20.0)
+        iv = raw_iv if (source == "rest" or raw_iv > 1) else raw_iv * 100
 
         gex = gamma * oi * mult * (spot or 0) ** 2
         if "P" in otype:
@@ -460,6 +541,7 @@ def _build_gex_data() -> dict:
         "symbol":           symbol,
         "expiration":       expiration,
         "underlying_price": spot,
+        "source":           source,
         "series":           series,
         "totals": {
             "total_call_gex": round(total_call_gex),
@@ -807,6 +889,31 @@ nav{flex:1;padding:10px 0}
   <div class="view" id="view-gex">
     <div class="gex-view" id="gex-inner">
 
+      <!-- Symbol selector -->
+      <div style="display:flex;align-items:center;gap:10px;padding:16px 24px 0">
+        <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Symbol</span>
+        <select id="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
+                border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;outline:none">
+          <option value="XSP">XSP</option>
+          <option value="SPX">SPX</option>
+          <option value="SPY">SPY</option>
+          <option value="QQQ">QQQ</option>
+          <option value="NDX">NDX</option>
+          <option value="IWM">IWM</option>
+          <option value="DIA">DIA</option>
+        </select>
+        <input id="gex-symbol-custom" type="text" placeholder="custom…"
+               style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
+                      border-radius:4px;padding:4px 8px;font-size:12px;width:80px;outline:none"
+               maxlength="6">
+        <button id="gex-load-btn"
+                style="background:#00c896;color:#0a0d12;border:none;border-radius:4px;
+                       padding:4px 12px;font-size:11px;font-weight:700;cursor:pointer">
+          Load
+        </button>
+        <span id="gex-source-badge" style="font-size:10px;color:#6b7280;margin-left:4px"></span>
+      </div>
+
       <!-- IV Skew section -->
       <div class="gex-section">
         <div class="gex-section-title">&#128208; Implied Volatility Skew</div>
@@ -925,7 +1032,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.add('active');
     document.getElementById('view-' + el.dataset.view).classList.add('active');
     if (el.dataset.view === 'history' && cache) renderHistory(cache);
-    if (el.dataset.view === 'gex') fetchGex();
+    if (el.dataset.view === 'gex') { _initGexSymbol(); fetchGex(); }
     if (el.dataset.view === 'logs') fetchLog();
   });
 });
@@ -1375,15 +1482,53 @@ function renderGex(d) {
   renderGexMetrics(d.totals);
 }
 
+function _initGexSymbol() {
+  // Pre-select the dropdown to the trading symbol if it's in the list
+  if (!gexData) return;
+  const sym = (gexData.symbol || '').toUpperCase();
+  const sel = document.getElementById('gex-symbol-select');
+  if ([...sel.options].some(o => o.value === sym)) {
+    sel.value = sym;
+    document.getElementById('gex-symbol-custom').value = '';
+  }
+}
+
+function gexSymbol() {
+  const custom = (document.getElementById('gex-symbol-custom').value || '').trim().toUpperCase();
+  return custom || document.getElementById('gex-symbol-select').value || 'XSP';
+}
+
 async function fetchGex() {
   if (!document.getElementById('view-gex').classList.contains('active')) return;
+  const sym = gexSymbol();
+  const badge = document.getElementById('gex-source-badge');
+  badge.textContent = 'Loading…';
   try {
-    const r = await fetch('/api/gex');
+    const r = await fetch('/api/gex?symbol=' + encodeURIComponent(sym));
     if (!r.ok) return;
     const d = await r.json();
+    if (d.source === 'rest') {
+      badge.textContent = '⚡ live REST fetch';
+      badge.style.color = '#f5a623';
+    } else if (d.source === 'stream_cache') {
+      badge.textContent = '● stream cache';
+      badge.style.color = '#00c896';
+    } else {
+      badge.textContent = '';
+    }
     renderGex(d);
-  } catch(_) {}
+  } catch(_) { badge.textContent = 'error'; }
 }
+
+// Symbol selector
+document.getElementById('gex-load-btn').addEventListener('click', fetchGex);
+document.getElementById('gex-symbol-select').addEventListener('change', () => {
+  document.getElementById('gex-symbol-custom').value = '';
+  fetchGex();
+});
+document.getElementById('gex-symbol-custom').addEventListener('keydown', e => {
+  if (e.key === 'Enter') fetchGex();
+});
 
 // GEX radio toggle listeners
 document.querySelectorAll('input[name="gex_view"]').forEach(el =>
@@ -1428,9 +1573,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(body)
-        elif self.path == "/api/gex":
+        elif self.path.startswith("/api/gex"):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            sym = (qs.get("symbol") or [None])[0]
             try:
-                result = _build_gex_data()
+                result = _build_gex_data(sym)
             except Exception as exc:
                 result = {"ok": False, "error": str(exc)}
             body = json.dumps(result, default=str).encode("utf-8")

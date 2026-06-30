@@ -40,3 +40,26 @@ def secrets_present() -> bool:
 
 def missing_secrets() -> list[str]:
     return [k for k in REQUIRED_SECRETS if not get_secret(k)]
+
+
+def set_secret(key: str, value: str) -> None:
+    try:
+        keyring.set_password(SERVICE_NAME, _entry(key), value)
+    except keyring.errors.NoKeyringError as exc:
+        raise CredentialError("No keyring backend available.") from exc
+    except keyring.errors.KeyringError as exc:
+        raise CredentialError(f"Keyring write failed: {exc}") from exc
+
+
+def delete_secret(key: str) -> None:
+    try:
+        keyring.delete_password(SERVICE_NAME, _entry(key))
+    except keyring.errors.PasswordDeleteError:
+        pass  # already absent
+    except keyring.errors.KeyringError as exc:
+        raise CredentialError(f"Keyring delete failed: {exc}") from exc
+
+
+def secrets_status() -> dict[str, bool]:
+    """Return {key: is_set} for all known secrets."""
+    return {k: bool(get_secret(k)) for k in ALL_SECRETS}

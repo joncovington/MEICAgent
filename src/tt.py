@@ -927,6 +927,51 @@ async def cmd_close_position(args) -> dict:
 # Stream commands (sync — no async needed)
 # ---------------------------------------------------------------------------
 
+def cmd_secrets_status(_args) -> dict:
+    from credentials import secrets_status
+    status = secrets_status()
+    return {
+        "ok": True,
+        "secrets": {k: ("set" if v else "missing") for k, v in status.items()},
+        "ready": all(status[k] for k in ("client_secret", "refresh_token")),
+    }
+
+
+def cmd_secrets_set(args) -> dict:
+    """Interactively prompt for and store credentials in the OS keyring."""
+    import getpass
+    from credentials import ALL_SECRETS, REQUIRED_SECRETS, set_secret, get_secret
+
+    label = {
+        "client_secret":  "Client Secret",
+        "refresh_token":  "Refresh Token",
+        "account_number": "Account Number (optional — press Enter to skip)",
+    }
+    updated = []
+    skipped = []
+
+    keys_to_set = args.keys if hasattr(args, "keys") and args.keys else list(ALL_SECRETS)
+
+    for key in keys_to_set:
+        current = get_secret(key)
+        hint = " [already set — press Enter to keep]" if current else ""
+        prompt = f"  {label.get(key, key)}{hint}: "
+        value = getpass.getpass(prompt)
+        if not value:
+            if current:
+                skipped.append(key)
+            elif key not in REQUIRED_SECRETS:
+                skipped.append(key)
+            else:
+                print(f"  ✗ {key} is required and was not provided.")
+                return {"ok": False, "error": f"{key} is required"}
+        else:
+            set_secret(key, value)
+            updated.append(key)
+
+    return {"ok": True, "updated": updated, "skipped": skipped}
+
+
 def cmd_stream_status(_args) -> dict:
     from pathlib import Path as _P
     pid_file = _P(__file__).parent.parent / "data" / "streamer.pid"
@@ -1085,6 +1130,15 @@ def main():
     p_cp.add_argument("--order_id", required=True, type=int)
     p_cp.add_argument("--account_number", default=None)
 
+    sub.add_parser("secrets_status")
+
+    p_sec = sub.add_parser("secrets_set")
+    p_sec.add_argument(
+        "--keys", nargs="+", default=None,
+        metavar="KEY",
+        help="Specific keys to set (default: all). Choices: client_secret refresh_token account_number",
+    )
+
     sub.add_parser("stream_status")
 
     p_ss = sub.add_parser("stream_subscribe")
@@ -1095,7 +1149,9 @@ def main():
 
     # Sync commands (no asyncio needed)
     sync_dispatch = {
-        "stream_status": cmd_stream_status,
+        "secrets_status": cmd_secrets_status,
+        "secrets_set":    cmd_secrets_set,
+        "stream_status":  cmd_stream_status,
     }
     if args.command in sync_dispatch:
         _out(sync_dispatch[args.command](args))

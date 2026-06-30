@@ -45,8 +45,10 @@ except ImportError:
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-_DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "meic_trades.db")
-_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "agent.log")
+_DB_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "meic_trades.db")
+_CACHE_DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "stream_cache.db")
+_CONFIG_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json")
+_LOG_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "agent.log")
 
 
 def _connect() -> sqlite3.Connection:
@@ -341,6 +343,134 @@ def _build_api_data() -> dict:
     }
 
 
+# ── GEX data builder ──────────────────────────────────────────────────────────
+
+def _load_symbol() -> str:
+    try:
+        with open(_CONFIG_PATH) as f:
+            return json.load(f).get("symbol", "XSP").upper()
+    except Exception:
+        return "XSP"
+
+
+def _compute_zero_gamma(series: list[dict]) -> float | None:
+    """Interpolate the strike where cumulative net GEX crosses zero."""
+    for i in range(len(series) - 1):
+        a, b = series[i], series[i + 1]
+        if a["net_gex"] != 0 and b["net_gex"] != 0 and a["net_gex"] * b["net_gex"] < 0:
+            t = abs(a["net_gex"]) / (abs(a["net_gex"]) + abs(b["net_gex"]))
+            return round(a["strike"] + t * (b["strike"] - a["strike"]), 2)
+    return None
+
+
+def _build_gex_data() -> dict:
+    if not os.path.exists(_CACHE_DB_PATH):
+        return {"ok": False, "error": "Stream cache not found — start the streamer first"}
+
+    symbol = _load_symbol()
+    conn = sqlite3.connect(_CACHE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    # Underlying price
+    tr = conn.execute("SELECT last FROM stream_trades WHERE symbol = ?", (symbol,)).fetchone()
+    spot = float(tr["last"]) if tr and tr["last"] is not None else None
+
+    # Nearest expiration
+    exp_row = conn.execute(
+        "SELECT expiration FROM stream_chain "
+        "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1"
+    ).fetchone()
+    if not exp_row:
+        conn.close()
+        return {"ok": False, "error": "No chain data — wait for streamer to load the option chain"}
+    expiration = exp_row["expiration"]
+
+    chain_rows = conn.execute(
+        "SELECT data_json FROM stream_chain WHERE expiration = ?", (expiration,)
+    ).fetchall()
+
+    greek_rows = conn.execute("SELECT * FROM stream_greeks").fetchall()
+    greeks = {r["symbol"]: dict(r) for r in greek_rows}
+
+    quote_rows = conn.execute("SELECT * FROM stream_quotes").fetchall()
+    quotes = {r["symbol"]: dict(r) for r in quote_rows}
+
+    conn.close()
+
+    # Aggregate per-strike
+    strikes: dict[float, dict] = {}
+    for row in chain_rows:
+        try:
+            opt = json.loads(row["data_json"])
+        except Exception:
+            continue
+        strike = float(opt.get("strike_price") or 0)
+        otype  = (opt.get("option_type") or "").upper()
+        sym    = opt.get("streamer_symbol") or ""
+        mult   = float(opt.get("shares_per_contract") or 100)
+        oi     = int(opt.get("open_interest") or 0)
+        vol    = int(opt.get("average_daily_volume") or 0)
+
+        g = greeks.get(sym, {})
+        q = quotes.get(sym, {})
+        gamma = float(g.get("gamma") or 0)
+        iv    = float(g.get("iv") or 0) * 100  # as percentage
+
+        gex = gamma * oi * mult * (spot or 0) ** 2
+        if "P" in otype:
+            gex = -gex
+
+        if strike not in strikes:
+            strikes[strike] = {
+                "call_gamma": 0, "call_iv": 0, "call_oi": 0, "call_vol": 0, "call_gex": 0,
+                "put_gamma":  0, "put_iv":  0, "put_oi":  0, "put_vol":  0, "put_gex":  0,
+            }
+        d = strikes[strike]
+        if "C" in otype:
+            d["call_gamma"] = gamma; d["call_iv"] = round(iv, 2)
+            d["call_oi"] = oi;       d["call_vol"] = vol; d["call_gex"] = gex
+        elif "P" in otype:
+            d["put_gamma"]  = gamma; d["put_iv"]  = round(iv, 2)
+            d["put_oi"]  = oi;       d["put_vol"]  = vol; d["put_gex"]  = gex
+
+    series = []
+    for strike in sorted(strikes):
+        d = strikes[strike]
+        net = d["call_gex"] + d["put_gex"]
+        series.append({
+            "strike":      strike,
+            "call_iv":     d["call_iv"],   "put_iv":      d["put_iv"],
+            "call_oi":     d["call_oi"],   "put_oi":      d["put_oi"],
+            "call_vol":    d["call_vol"],  "put_vol":     d["put_vol"],
+            "total_vol":   d["call_vol"] + d["put_vol"],
+            "call_gex":    round(d["call_gex"]),
+            "put_gex":     round(d["put_gex"]),   # negative value
+            "net_gex":     round(net),
+            "abs_gex":     round(abs(net)),
+        })
+
+    total_call_gex = sum(s["call_gex"] for s in series if s["call_gex"] > 0)
+    total_put_gex  = abs(sum(s["put_gex"] for s in series if s["put_gex"] < 0))
+    net_gex_total  = sum(s["net_gex"] for s in series)
+    max_gex_s      = max(series, key=lambda s: s["abs_gex"], default=None)
+    zero_gamma     = _compute_zero_gamma(series)
+
+    return {
+        "ok":               True,
+        "symbol":           symbol,
+        "expiration":       expiration,
+        "underlying_price": spot,
+        "series":           series,
+        "totals": {
+            "total_call_gex": round(total_call_gex),
+            "total_put_gex":  round(total_put_gex),
+            "net_gex":        round(net_gex_total),
+            "max_gex_strike": max_gex_s["strike"] if max_gex_s else None,
+            "zero_gamma":     zero_gamma,
+        },
+    }
+
+
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
 HTML = """<!DOCTYPE html>
@@ -456,6 +586,36 @@ nav{flex:1;padding:10px 0}
 .fee-val{font-size:17px;font-weight:700;color:#e6edf3}
 .fee-val.neg{color:#e8423a}.fee-val.warn{color:#f5a623}
 
+/* GEX view */
+.gex-view{overflow-y:auto;padding:0 0 24px}
+.gex-section{padding:20px 24px 0}
+.gex-section-title{font-size:15px;font-weight:700;color:#e6edf3;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.gex-section-sub{font-size:11px;color:#6b7280;margin-bottom:14px}
+.gex-divider{height:1px;background:#1e2430;margin:20px 24px 0}
+.gex-row{display:grid;gap:16px;margin-bottom:16px}
+.gex-row-2{grid-template-columns:1fr 1fr}
+.gex-row-main{grid-template-columns:1fr 280px}
+.chart-card{background:#0d1117;border:1px solid #1e2430;border-radius:6px;padding:14px 16px}
+.chart-card-title{font-size:10px;font-weight:700;color:#6b7280;letter-spacing:1.2px;
+                   text-transform:uppercase;margin-bottom:10px}
+.chart-card canvas{display:block;width:100%!important}
+.radio-group{display:flex;gap:4px;margin-bottom:10px}
+.radio-group label{display:flex;align-items:center;gap:5px;cursor:pointer;
+                    font-size:11px;color:#6b7280;padding:4px 10px;
+                    border:1px solid #1e2430;border-radius:4px;transition:all .15s}
+.radio-group label:hover{color:#e6edf3;border-color:#3d4451}
+.radio-group input{display:none}
+.radio-group input:checked+span{color:#e6edf3}
+.radio-group label:has(input:checked){color:#e6edf3;border-color:#00c896;background:#0d2018}
+.metrics-panel{background:#0d1117;border:1px solid #1e2430;border-radius:6px;padding:16px}
+.metrics-panel-title{font-size:10px;font-weight:700;color:#6b7280;letter-spacing:1.2px;
+                      text-transform:uppercase;margin-bottom:14px;display:flex;align-items:center;gap:6px}
+.metric-row{margin-bottom:14px}
+.metric-lbl{font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px;margin-bottom:2px}
+.metric-val{font-size:22px;font-weight:700;color:#e6edf3;line-height:1.1}
+.metric-val.pos{color:#00c896}.metric-val.neg{color:#e8423a}
+.metric-divider{height:1px;background:#1e2430;margin:10px 0}
+
 /* Log view */
 .log-toolbar{display:flex;align-items:center;gap:10px;padding:10px 18px;
               border-bottom:1px solid #1e2430;flex-shrink:0}
@@ -491,6 +651,9 @@ nav{flex:1;padding:10px 0}
     </div>
     <div class="nav-item" data-view="history">
       <span class="nav-icon">&#9711;</span> History
+    </div>
+    <div class="nav-item" data-view="gex">
+      <span class="nav-icon">&#9699;</span> GEX
     </div>
     <div class="nav-item" data-view="logs">
       <span class="nav-icon">&#9776;</span> Logs
@@ -640,6 +803,87 @@ nav{flex:1;padding:10px 0}
     </div>
   </div>
 
+  <!-- GEX VIEW -->
+  <div class="view" id="view-gex">
+    <div class="gex-view" id="gex-inner">
+
+      <!-- IV Skew section -->
+      <div class="gex-section">
+        <div class="gex-section-title">&#128208; Implied Volatility Skew</div>
+        <div class="gex-section-sub" id="gex-iv-sub">Loading&hellip;</div>
+        <div class="gex-row gex-row-2">
+          <div class="chart-card">
+            <div class="chart-card-title">Call IV vs Put IV by Strike</div>
+            <canvas id="gex-iv-chart" height="180"></canvas>
+          </div>
+          <div class="chart-card">
+            <div class="chart-card-title">Open Interest by Strike</div>
+            <canvas id="gex-oi-chart" height="180"></canvas>
+          </div>
+        </div>
+        <div class="chart-card" style="margin-bottom:0">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <div class="chart-card-title" style="margin:0">Volume by Strike</div>
+            <div class="radio-group" id="vol-view-group">
+              <label><input type="radio" name="vol_view" value="split"><span>Calls vs Puts</span></label>
+              <label><input type="radio" name="vol_view" value="total" checked><span>&#11044; Total Volume</span></label>
+            </div>
+          </div>
+          <canvas id="gex-vol-chart" height="140"></canvas>
+        </div>
+      </div>
+
+      <div class="gex-divider"></div>
+
+      <!-- GEX Dashboard section -->
+      <div class="gex-section">
+        <div class="gex-section-title">&#128202; Options Gamma Exposure Dashboard</div>
+        <div class="gex-section-sub" id="gex-main-sub">&nbsp;</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+          <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">GEX View</span>
+          <div class="radio-group" id="gex-view-group">
+            <label><input type="radio" name="gex_view" value="split"><span>Calls vs Puts</span></label>
+            <label><input type="radio" name="gex_view" value="net" checked><span>&#11044; Net GEX</span></label>
+            <label><input type="radio" name="gex_view" value="abs"><span>Absolute GEX</span></label>
+          </div>
+        </div>
+        <div class="gex-row gex-row-main">
+          <div class="chart-card">
+            <div class="chart-card-title" id="gex-chart-title">GEX by Strike &mdash; Net GEX</div>
+            <canvas id="gex-main-chart" height="260"></canvas>
+          </div>
+          <div class="metrics-panel">
+            <div class="metrics-panel-title">&#128202; Total GEX</div>
+            <div class="metric-row">
+              <div class="metric-lbl">Total Call GEX</div>
+              <div class="metric-val pos" id="m-call-gex">&mdash;</div>
+            </div>
+            <div class="metric-row">
+              <div class="metric-lbl">Total Put GEX</div>
+              <div class="metric-val neg" id="m-put-gex">&mdash;</div>
+            </div>
+            <div class="metric-divider"></div>
+            <div class="metric-row">
+              <div class="metric-lbl">Net GEX</div>
+              <div class="metric-val" id="m-net-gex">&mdash;</div>
+            </div>
+            <div class="metric-divider"></div>
+            <div class="metric-row">
+              <div class="metric-lbl">Max GEX Strike</div>
+              <div class="metric-val" id="m-max-strike">&mdash;</div>
+            </div>
+            <div class="metric-divider"></div>
+            <div class="metric-row" style="margin-bottom:0">
+              <div class="metric-lbl">Zero Gamma (Flip) <span title="Strike where dealer GEX transitions from negative to positive" style="cursor:help;color:#3d4451">&#9432;</span></div>
+              <div class="metric-val" id="m-zero-gamma">&mdash;</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
   <!-- LOGS VIEW -->
   <div class="view" id="view-logs">
     <div class="log-toolbar">
@@ -681,6 +925,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.add('active');
     document.getElementById('view-' + el.dataset.view).classList.add('active');
     if (el.dataset.view === 'history' && cache) renderHistory(cache);
+    if (el.dataset.view === 'gex') fetchGex();
     if (el.dataset.view === 'logs') fetchLog();
   });
 });
@@ -952,14 +1197,209 @@ async function fetchLog() {
   document.getElementById(id).addEventListener('change', () => { lastLogCount = -1; fetchLog(); });
 });
 
+// ── GEX ───────────────────────────────────────────────────────────────────────
+let gexData = null;
+let gexIvChart = null, gexOiChart = null, gexVolChart = null, gexMainChart = null;
+
+function fGex(v) {
+  if (v == null) return '—';
+  const abs = Math.abs(v);
+  const sign = v < 0 ? '-' : '';
+  if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(2) + 'B';
+  if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+  if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
+  return sign + '$' + abs.toFixed(0);
+}
+
+function _vline(x, label, color) {
+  return {
+    id: 'vline_' + label,
+    beforeDatasetsDraw(chart) {
+      const {ctx, scales} = chart;
+      if (!scales.x) return;
+      const xPx = scales.x.getPixelForValue(x);
+      if (xPx == null || isNaN(xPx)) return;
+      const {top, bottom} = chart.chartArea;
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(xPx, top); ctx.lineTo(xPx, bottom); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, xPx, bottom + 12);
+      ctx.restore();
+    }
+  };
+}
+
+function _baseOpts(plugins) {
+  return {
+    responsive: true, maintainAspectRatio: false,
+    animation: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: { mode: 'index', intersect: false, backgroundColor: '#1a1f2e',
+                 titleColor: '#e6edf3', bodyColor: '#8b949e', borderColor: '#1e2430', borderWidth: 1 },
+      ...(plugins || {})
+    },
+    scales: {
+      x: { grid: { color: '#1a1f2a' }, ticks: { color: '#4a5568', font: { size: 9 }, maxRotation: 0 } },
+      y: { grid: { color: '#1a1f2a' }, ticks: { color: '#4a5568', font: { size: 9 } } }
+    }
+  };
+}
+
+function renderIvChart(series, spot) {
+  const labels = series.map(s => s.strike);
+  const ds = [
+    { label: 'Call IV', data: series.map(s => s.call_iv || null),
+      borderColor: '#00c896', pointRadius: 3, pointHoverRadius: 5,
+      borderWidth: 2, tension: 0.3, fill: false },
+    { label: 'Put IV',  data: series.map(s => s.put_iv  || null),
+      borderColor: '#e8423a', pointRadius: 3, pointHoverRadius: 5,
+      borderWidth: 2, tension: 0.3, fill: false },
+  ];
+  const opts = _baseOpts();
+  opts.scales.y.ticks.callback = v => v.toFixed(1) + '%';
+  opts.plugins.tooltip.callbacks = { label: ctx => ctx.dataset.label + ': ' + (ctx.parsed.y || 0).toFixed(2) + '%' };
+  opts.plugins.vline = spot != null ? _vline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
+  if (gexIvChart) { gexIvChart.data.labels = labels; gexIvChart.data.datasets = ds; gexIvChart.update(); return; }
+  gexIvChart = new Chart(document.getElementById('gex-iv-chart'), { type: 'line', data: { labels, datasets: ds }, options: opts });
+}
+
+function renderOiChart(series, spot) {
+  const labels = series.map(s => s.strike);
+  const ds = [
+    { label: 'Call OI', data: series.map(s => s.call_oi),  backgroundColor: '#00c896aa' },
+    { label: 'Put OI',  data: series.map(s => -s.put_oi),  backgroundColor: '#e8423aaa' },
+  ];
+  const opts = _baseOpts();
+  opts.scales.y.stacked = false;
+  opts.plugins.tooltip.callbacks = {
+    label: ctx => (ctx.dataset.label || '') + ': ' + Math.abs(ctx.parsed.y).toLocaleString()
+  };
+  opts.plugins.vline = spot != null ? _vline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
+  if (gexOiChart) { gexOiChart.data.labels = labels; gexOiChart.data.datasets = ds; gexOiChart.update(); return; }
+  gexOiChart = new Chart(document.getElementById('gex-oi-chart'), { type: 'bar', data: { labels, datasets: ds }, options: opts });
+}
+
+function renderVolChart(series, spot, mode) {
+  const labels = series.map(s => s.strike);
+  let ds;
+  if (mode === 'split') {
+    ds = [
+      { label: 'Call Vol', data: series.map(s => s.call_vol), backgroundColor: '#00c896aa' },
+      { label: 'Put Vol',  data: series.map(s => s.put_vol),  backgroundColor: '#e8423aaa' },
+    ];
+  } else {
+    ds = [{ label: 'Total Vol', data: series.map(s => s.total_vol), backgroundColor: '#9b59b6aa' }];
+  }
+  const opts = _baseOpts();
+  opts.plugins.tooltip.callbacks = { label: ctx => (ctx.dataset.label||'') + ': ' + ctx.parsed.y.toLocaleString() };
+  opts.plugins.vline = spot != null ? _vline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
+  if (gexVolChart) { gexVolChart.destroy(); gexVolChart = null; }
+  gexVolChart = new Chart(document.getElementById('gex-vol-chart'), { type: 'bar', data: { labels, datasets: ds }, options: opts });
+}
+
+function renderGexMainChart(series, spot, zero, mode) {
+  const labels = series.map(s => s.strike);
+  let ds, titleText;
+  if (mode === 'split') {
+    ds = [
+      { label: 'Call GEX', data: series.map(s => s.call_gex), backgroundColor: '#00c896aa' },
+      { label: 'Put GEX',  data: series.map(s => s.put_gex),  backgroundColor: '#e8423aaa' },
+    ];
+    titleText = 'GEX by Strike — Calls vs Puts';
+  } else if (mode === 'abs') {
+    ds = [{ label: 'Abs GEX', data: series.map(s => s.abs_gex), backgroundColor: '#4a90d9aa' }];
+    titleText = 'GEX by Strike — Absolute GEX';
+  } else {
+    ds = [{ label: 'Net GEX', data: series.map(s => s.net_gex),
+            backgroundColor: series.map(s => s.net_gex >= 0 ? '#00c896aa' : '#e8423aaa') }];
+    titleText = 'GEX by Strike — Net GEX';
+  }
+  document.getElementById('gex-chart-title').textContent = titleText;
+  const opts = _baseOpts();
+  opts.scales.y.ticks.callback = v => fGex(v);
+  opts.plugins.tooltip.callbacks = {
+    label: ctx => (ctx.dataset.label||'') + ': ' + fGex(ctx.parsed.y)
+  };
+  const plugins = [];
+  if (spot != null)  plugins.push(_vline(spot,  '$' + spot.toFixed(2),  '#f5a623'));
+  if (zero != null)  plugins.push(_vline(zero,  'Zero Γ: $' + zero.toFixed(2), '#9b59b6'));
+  opts.plugins.customVlines = { id: 'customVlines', beforeDatasetsDraw(chart) {
+    plugins.forEach(p => p.beforeDatasetsDraw(chart));
+  }};
+  if (gexMainChart) { gexMainChart.destroy(); gexMainChart = null; }
+  gexMainChart = new Chart(document.getElementById('gex-main-chart'),
+    { type: 'bar', data: { labels, datasets: ds },
+      options: opts, plugins: [opts.plugins.customVlines] });
+}
+
+function renderGexMetrics(totals) {
+  const t = totals || {};
+  document.getElementById('m-call-gex').textContent  = fGex(t.total_call_gex);
+  const putEl = document.getElementById('m-put-gex');
+  putEl.textContent = t.total_put_gex != null ? fGex(-t.total_put_gex) : '—';
+  const netEl = document.getElementById('m-net-gex');
+  netEl.textContent = fGex(t.net_gex);
+  netEl.className = 'metric-val ' + (t.net_gex >= 0 ? 'pos' : 'neg');
+  document.getElementById('m-max-strike').textContent = t.max_gex_strike != null ? '$' + t.max_gex_strike : '—';
+  document.getElementById('m-zero-gamma').textContent = t.zero_gamma != null ? '$' + t.zero_gamma.toFixed(2) : '—';
+}
+
+function renderGex(d) {
+  gexData = d;
+  if (!d.ok) {
+    document.getElementById('gex-iv-sub').textContent = d.error || 'No data';
+    return;
+  }
+  const series = d.series || [];
+  const spot   = d.underlying_price;
+  const zero   = d.totals && d.totals.zero_gamma;
+  const sym    = d.symbol || '';
+  const exp    = d.expiration || '';
+  document.getElementById('gex-iv-sub').textContent   = sym + ' Implied Volatility Skew — Exp: ' + exp;
+  document.getElementById('gex-main-sub').textContent = sym + ' — Exp: ' + exp + (spot ? '  |  Spot: $' + spot.toFixed(2) : '');
+
+  const gexMode = document.querySelector('input[name="gex_view"]:checked')?.value || 'net';
+  const volMode = document.querySelector('input[name="vol_view"]:checked')?.value || 'total';
+
+  renderIvChart(series, spot);
+  renderOiChart(series, spot);
+  renderVolChart(series, spot, volMode);
+  renderGexMainChart(series, spot, zero, gexMode);
+  renderGexMetrics(d.totals);
+}
+
+async function fetchGex() {
+  if (!document.getElementById('view-gex').classList.contains('active')) return;
+  try {
+    const r = await fetch('/api/gex');
+    if (!r.ok) return;
+    const d = await r.json();
+    renderGex(d);
+  } catch(_) {}
+}
+
+// GEX radio toggle listeners
+document.querySelectorAll('input[name="gex_view"]').forEach(el =>
+  el.addEventListener('change', () => { if (gexData) renderGex(gexData); }));
+document.querySelectorAll('input[name="vol_view"]').forEach(el =>
+  el.addEventListener('change', () => { if (gexData) renderGex(gexData); }));
+
 // ── auto-refresh ──────────────────────────────────────────────────────────────
 fetchData();
 setInterval(() => {
   cd--;
   document.getElementById('scountdown').textContent = 'Refresh in ' + cd + 's';
-  if (cd <= 0) { cd = 30; fetchData(); }
+  if (cd <= 0) { cd = 30; fetchData(); fetchGex(); }
 }, 1000);
 setInterval(fetchLog, 10000);
+setInterval(fetchGex, 15000);
 </script>
 </body>
 </html>"""
@@ -979,6 +1419,18 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/data":
             try:
                 result = _build_api_data()
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc)}
+            body = json.dumps(result, default=str).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/api/gex":
+            try:
+                result = _build_gex_data()
             except Exception as exc:
                 result = {"ok": False, "error": str(exc)}
             body = json.dumps(result, default=str).encode("utf-8")

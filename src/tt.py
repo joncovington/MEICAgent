@@ -191,6 +191,28 @@ class _CachedOption:
         return object.__getattribute__(self, "_data")
 
 
+def _cache_get_oi(symbols: list[str]) -> dict[str, int]:
+    """Return {symbol: open_interest} for symbols present in stream_oi (no age filter — OI is daily)."""
+    conn = _cache_conn()
+    if conn is None:
+        return {}
+    out: dict[str, int] = {}
+    try:
+        placeholders = ",".join(["?" for _ in symbols])
+        rows = conn.execute(
+            f"SELECT symbol, open_interest FROM stream_oi WHERE symbol IN ({placeholders})",
+            symbols,
+        ).fetchall()
+        for row in rows:
+            if row["open_interest"] is not None:
+                out[row["symbol"]] = int(row["open_interest"])
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return out
+
+
 def _cache_get_greeks(symbols: list[str]) -> dict[str, dict]:
     """Return {symbol: {delta, gamma, theta, iv}} for symbols with fresh cache entries."""
     conn = _cache_conn()
@@ -832,7 +854,7 @@ def _build_order(spec: dict):
     otype = OrderType(str(spec.get("order_type", "Limit")))
     legs = []
     for leg in spec.get("legs", []):
-        action = OrderAction(_ACTION_MAP[str(leg["action"]).strip().lower()])
+        action = OrderAction[_ACTION_MAP[str(leg["action"]).strip().lower()]]
         legs.append(Leg(
             instrument_type=leg["instrument_type"],
             symbol=leg["symbol"],
@@ -970,6 +992,142 @@ def cmd_secrets_set(args) -> dict:
             updated.append(key)
 
     return {"ok": True, "updated": updated, "skipped": skipped}
+
+
+def _compute_gex(chain_entries: list[dict], greeks: dict, oi: dict, spot: float) -> dict:
+    """Compute GEX profile from option chain entries, greeks cache, and OI cache.
+
+    Returns net_gex, gamma_flip (zero-gamma level), call_wall, put_wall, and per-strike breakdown.
+    GEX per strike = gamma × OI × 100 × spot² × 0.01
+    Call GEX is positive (dealer counter-trend); put GEX is positive magnitude but subtracted for net.
+    """
+    multiplier = 100
+    per_strike: dict[float, dict] = {}
+
+    for entry in chain_entries:
+        strike = _num(entry.get("strike_price"))
+        sym = entry.get("streamer_symbol")
+        if sym is None or strike is None or strike <= 0:
+            continue
+        g = greeks.get(sym)
+        open_interest = oi.get(sym)
+        if g is None or open_interest is None or open_interest == 0:
+            continue
+        gamma = _num(g.get("gamma") if isinstance(g, dict) else getattr(g, "gamma", None))
+        if gamma is None:
+            continue
+        gex_val = gamma * open_interest * multiplier * spot * spot * 0.01
+        opt_type = entry.get("option_type", "")
+        is_call = "C" in opt_type.upper()
+        if strike not in per_strike:
+            per_strike[strike] = {"strike": strike, "call_gex": 0.0, "put_gex": 0.0}
+        if is_call:
+            per_strike[strike]["call_gex"] += gex_val
+        else:
+            per_strike[strike]["put_gex"] += gex_val
+
+    if not per_strike:
+        return {"ok": False, "error": "insufficient GEX data — OI not yet cached (streamer must run first)"}
+
+    strikes_sorted = sorted(per_strike.values(), key=lambda x: x["strike"])
+    for s in strikes_sorted:
+        s["net_gex"] = s["call_gex"] - s["put_gex"]
+
+    net_gex = sum(s["net_gex"] for s in strikes_sorted)
+    call_wall = max(strikes_sorted, key=lambda x: x["call_gex"])["strike"]
+    put_wall  = max(strikes_sorted, key=lambda x: x["put_gex"])["strike"]
+
+    # Gamma flip: interpolate where cumulative net GEX crosses zero (scanning low→high strike)
+    gamma_flip: float | None = None
+    cumulative = 0.0
+    for i, s in enumerate(strikes_sorted):
+        prev = cumulative
+        cumulative += s["net_gex"]
+        if i > 0 and ((prev < 0 <= cumulative) or (prev >= 0 > cumulative)):
+            prev_strike = strikes_sorted[i - 1]["strike"]
+            curr_strike = s["strike"]
+            denom = cumulative - prev
+            t = (-prev / denom) if denom != 0 else 0.5
+            gamma_flip = round(prev_strike + t * (curr_strike - prev_strike), 2)
+            break
+
+    return {
+        "ok": True,
+        "net_gex": round(net_gex, 2),
+        "gex_positive": net_gex > 0,
+        "call_wall": call_wall,
+        "put_wall": put_wall,
+        "gamma_flip": gamma_flip,
+        "strikes_with_data": len(per_strike),
+        "per_strike": [
+            {
+                "strike": s["strike"],
+                "call_gex": round(s["call_gex"], 2),
+                "put_gex": round(s["put_gex"], 2),
+                "net_gex": round(s["net_gex"], 2),
+            }
+            for s in strikes_sorted
+        ],
+    }
+
+
+async def cmd_get_gex(args) -> dict:
+    """Compute GEX profile for the trading symbol from streamer cache (greeks + OI)."""
+    try:
+        symbol = args.symbol.strip().upper()
+        strike_count = getattr(args, "strike_count", 20)
+        around_price = getattr(args, "around_price", None)
+
+        # Get current underlying price for centering and GEX formula
+        spot: float | None = None
+        cached_trade = _cache_get_trade(symbol)
+        if cached_trade is not None:
+            spot = cached_trade
+        else:
+            trades = await _collect_last_prices([symbol], 5.0)
+            spot = trades.get(symbol)
+        if spot is None:
+            return {"ok": False, "error": f"Cannot determine spot price for {symbol}"}
+
+        center = around_price if around_price is not None else spot
+
+        # Fetch chain structure
+        chain = await _fetch_chain(symbol)
+        if not chain:
+            return {"ok": False, "error": f"No option chain for {symbol}"}
+        expiration = _nearest_expiration(sorted(chain.keys()))
+        options = list(chain[expiration])
+        options = _atm_window(options, strike_count, center)
+
+        streamer_symbols = [
+            o.streamer_symbol for o in options if getattr(o, "streamer_symbol", None)
+        ]
+        if not streamer_symbols:
+            return {"ok": False, "error": "No streamer symbols in chain window"}
+
+        # Load greeks and OI from cache
+        greeks = _cache_get_greeks(streamer_symbols)
+        oi     = _cache_get_oi(streamer_symbols)
+
+        # Fall back to live DXLink for missing greeks (OI only comes from Summary — no live fallback)
+        missing_g = [s for s in streamer_symbols if s not in greeks]
+        if missing_g:
+            live_g = await _collect_greeks(missing_g, 6.0)
+            greeks.update({s: {"delta": _num(v.delta), "gamma": _num(v.gamma),
+                               "theta": _num(v.theta), "iv": _num(v.volatility)}
+                           for s, v in live_g.items()})
+
+        chain_entries = [_serialize(o) for o in options]
+        result = _compute_gex(chain_entries, greeks, oi, spot)
+        if result.get("ok"):
+            result["symbol"] = symbol
+            result["expiration"] = str(expiration)
+            result["spot"] = spot
+            result["oi_symbols_found"] = len(oi)
+            result["greeks_symbols_found"] = len(greeks)
+        return result
+    except Exception as exc:
+        return _error(exc)
 
 
 def cmd_stream_status(_args) -> dict:
@@ -1139,6 +1297,13 @@ def main():
         help="Specific keys to set (default: all). Choices: client_secret refresh_token account_number",
     )
 
+    p_gex = sub.add_parser("get_gex")
+    p_gex.add_argument("--symbol", required=True, help="Trading symbol (e.g. XSP)")
+    p_gex.add_argument("--strike_count", type=int, default=20,
+                       help="Strikes each side of ATM to include in GEX window")
+    p_gex.add_argument("--around_price", type=float, default=None,
+                       help="Center the window around this price (default: current spot)")
+
     sub.add_parser("stream_status")
 
     p_ss = sub.add_parser("stream_subscribe")
@@ -1175,6 +1340,7 @@ def main():
         "get_quote": cmd_get_quote,
         "get_option_chain": cmd_get_option_chain,
         "get_strategies": cmd_get_strategies,
+        "get_gex": cmd_get_gex,
         "get_working_orders": cmd_get_working_orders,
         "execute_trade": cmd_execute_trade,
         "adjust_order": cmd_adjust_order,

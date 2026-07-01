@@ -61,6 +61,16 @@ python src/tt.py execute_trade --order '<JSON order spec>'
 ```
 (Default is dry run; omit `--live` to validate only.)
 
+5a. **Pre-submit requote** — immediately before adding `--live`, re-fetch the current bid/ask for all four legs:
+```bash
+python src/tt.py get_option_chain --symbol <symbol> --expiration <date> --include_quotes --around_price <last>
+```
+Recompute `ic_natural_bid` from the fresh quotes. If either of these conditions holds, **abort** the live submission and re-evaluate next iteration:
+- `ic_natural_bid` ≤ 0 (credit has flipped to a debit — would trigger Spread Checker rejection)
+- `ic_natural_bid` < `planned_limit_price` − `pre_submit_requote_threshold` (price has dropped more than $0.03 from the dry-run price)
+
+Do not widen the limit to compensate — abort cleanly. Log the abort reason. This check catches underlying price drift between the Step 3 quote fetch and actual submission.
+
 6. **Submit the order** — add `--live` to submit the real order. Based on `separate_spread_entry` config:
    - `false`: one 4-leg combo order.
    - `true`: two separate 2-leg spread orders (dry run each before submitting each).

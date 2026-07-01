@@ -366,22 +366,64 @@ def _compute_zero_gamma(series: list[dict]) -> float | None:
 
 
 _TT_CMD = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tt.py")]
+_STREAMER_API = "http://127.0.0.1:7699/api"
 
 # Common symbols offered in the GEX symbol picker
 GEX_SYMBOLS = ["XSP", "SPX", "SPY", "QQQ", "NDX", "IWM", "DIA"]
 
 
-def _fetch_chain_rest(symbol: str) -> tuple[list[dict], dict, dict]:
-    """Fetch option chain via tt.py subprocess for symbols not in the stream cache.
-    Returns (options_list, greeks_map, quotes_map).
+def _notify_streamer_gex_symbol(symbol: str) -> None:
+    """Tell the streamer daemon to switch its GEX subscription to symbol.
+    Fire-and-forget — dashboard remains responsive even if the streamer is down.
     """
+    import urllib.request
+    try:
+        payload = json.dumps({"command": "set_gex_symbol", "args": {"symbol": symbol}}).encode()
+        req = urllib.request.Request(
+            _STREAMER_API, data=payload,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        urllib.request.urlopen(req, timeout=1)
+    except Exception:
+        pass  # streamer not running or unreachable — dashboard falls back to REST
+
+
+def _fetch_spot_rest(symbol: str) -> float | None:
+    """Get the current spot price for a symbol via tt.py."""
     try:
         proc = subprocess.run(
-            _TT_CMD + ["get_option_chain", "--symbol", symbol,
-                       "--include_greeks", "--include_quotes",
-                       "--strike_count", "60"],
-            capture_output=True, text=True, timeout=20,
+            _TT_CMD + ["get_quote", "--symbol", symbol],
+            capture_output=True, text=True, timeout=10,
         )
+        data = json.loads(proc.stdout)
+        price = data.get("last") or data.get("mid")
+        return float(price) if price else None
+    except Exception:
+        return None
+
+
+def _parse_streamer_underlying(streamer_symbol: str) -> str | None:
+    """Extract the underlying ticker from a streamer option symbol.
+    E.g. '.XSP260630C740' -> 'XSP', '.SPXW260630P5500' -> 'SPXW'
+    """
+    import re
+    m = re.match(r'\.([A-Z]+)\d{6}[CP]', streamer_symbol)
+    return m.group(1) if m else None
+
+
+def _fetch_chain_rest(symbol: str, around_price: float | None = None) -> tuple[list[dict], dict, dict, str | None]:
+    """Fetch option chain via tt.py subprocess for symbols not in the stream cache.
+    Returns (options_list, greeks_map, quotes_map, actual_underlying_ticker).
+    actual_underlying_ticker is the ticker embedded in the returned streamer symbols
+    (may differ from symbol — e.g. 'SPX' request returns 'XSP' streamer symbols).
+    """
+    cmd = _TT_CMD + ["get_option_chain", "--symbol", symbol,
+                     "--include_greeks", "--include_quotes",
+                     "--strike_count", "60"]
+    if around_price is not None:
+        cmd += ["--around_price", str(around_price)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         data = json.loads(proc.stdout)
     except Exception as exc:
         raise RuntimeError(f"REST chain fetch failed: {exc}") from exc
@@ -392,11 +434,14 @@ def _fetch_chain_rest(symbol: str) -> tuple[list[dict], dict, dict]:
     options: list[dict] = []
     greeks: dict[str, dict] = {}
     quotes: dict[str, dict] = {}
+    actual_underlying: str | None = None
 
     for _exp, legs in (data.get("chain") or {}).items():
         for leg in legs:
             sym = leg.get("streamer_symbol") or ""
             options.append(leg)
+            if actual_underlying is None and sym:
+                actual_underlying = _parse_streamer_underlying(sym)
             if leg.get("delta") is not None:
                 greeks[sym] = {
                     "gamma": leg.get("gamma"),
@@ -405,7 +450,7 @@ def _fetch_chain_rest(symbol: str) -> tuple[list[dict], dict, dict]:
             if leg.get("bid") is not None:
                 quotes[sym] = {"bid": leg["bid"], "ask": leg["ask"], "mid": leg.get("mid")}
 
-    return options, greeks, quotes
+    return options, greeks, quotes, actual_underlying
 
 
 def _build_gex_data(symbol: str | None = None) -> dict:
@@ -452,10 +497,34 @@ def _build_gex_data(symbol: str | None = None) -> dict:
     if cache_conn:
         cache_conn.close()
 
+    # Scale factor applied to strikes after series is built (default 1.0 = no scaling)
+    strike_scale: float = 1.0
+
     # Fall back to REST fetch if symbol not in cache
     if not chain_rows:
         try:
-            rest_opts, greeks, quotes = _fetch_chain_rest(symbol)
+            # Probe fetch: detect the actual streamer underlying ticker.
+            # tastytrade maps several symbols to a scaled equivalent
+            # (e.g. SPX/SPXW → XSP options at 1/10 scale).
+            probe_opts, _, _, actual_und = _fetch_chain_rest(symbol)
+            probe_ticker = actual_und or symbol
+
+            # Get spot of the actual streamer underlying to center the strike range
+            chain_spot = _fetch_spot_rest(probe_ticker)
+            if chain_spot is None:
+                chain_spot = _fetch_spot_rest(symbol)
+
+            # If tastytrade mapped us to a different underlying, compute a scale factor
+            # so the chart displays strikes in the requested symbol's price domain.
+            if probe_ticker and probe_ticker.upper() != symbol.upper() and chain_spot:
+                requested_spot = _fetch_spot_rest(symbol)
+                if requested_spot and chain_spot:
+                    strike_scale = requested_spot / chain_spot
+
+            # Re-fetch centered on the real underlying's spot price
+            rest_opts, greeks, quotes, _ = _fetch_chain_rest(symbol, around_price=chain_spot)
+            # Display spot in the requested symbol's price domain
+            spot = chain_spot * strike_scale if chain_spot else None
             source = "rest"
             # Infer expiration from options
             expirations = sorted({o.get("expiration_date", "") for o in rest_opts if o.get("expiration_date")})
@@ -475,6 +544,10 @@ def _build_gex_data(symbol: str | None = None) -> dict:
             return json.loads(row["data_json"])
         except Exception:
             return {}
+
+    # spot is the display price (scaled to requested symbol's domain).
+    # gex_spot is the actual chain underlying price used in GEX math.
+    gex_spot = (spot / strike_scale) if (spot and strike_scale != 1.0) else spot
 
     # Aggregate per-strike
     strikes: dict[float, dict] = {}
@@ -497,7 +570,7 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         # cache stores raw decimal (0.20); REST path stores already-pct (20.0)
         iv = raw_iv if (source == "rest" or raw_iv > 1) else raw_iv * 100
 
-        gex = gamma * oi * mult * (spot or 0) ** 2
+        gex = gamma * oi * mult * (gex_spot or 0)
         if "P" in otype:
             gex = -gex
 
@@ -519,7 +592,7 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         d = strikes[strike]
         net = d["call_gex"] + d["put_gex"]
         series.append({
-            "strike":      strike,
+            "strike":      round(strike * strike_scale, 2),
             "call_iv":     d["call_iv"],   "put_iv":      d["put_iv"],
             "call_oi":     d["call_oi"],   "put_oi":      d["put_oi"],
             "call_vol":    d["call_vol"],  "put_vol":     d["put_vol"],
@@ -534,6 +607,7 @@ def _build_gex_data(symbol: str | None = None) -> dict:
     total_put_gex  = abs(sum(s["put_gex"] for s in series if s["put_gex"] < 0))
     net_gex_total  = sum(s["net_gex"] for s in series)
     max_gex_s      = max(series, key=lambda s: s["abs_gex"], default=None)
+    # _compute_zero_gamma interpolates from series which already has scaled strikes
     zero_gamma     = _compute_zero_gamma(series)
 
     return {
@@ -677,6 +751,13 @@ nav{flex:1;padding:10px 0}
 .gex-row{display:grid;gap:16px;margin-bottom:16px}
 .gex-row-2{grid-template-columns:1fr 1fr}
 .gex-row-main{grid-template-columns:1fr 280px}
+.gex-tabs{display:flex;gap:0;padding:12px 24px 0;border-bottom:1px solid #1e2430}
+.gex-tab{font-size:11px;font-weight:700;color:#6b7280;padding:6px 14px;cursor:pointer;
+         border-bottom:2px solid transparent;margin-bottom:-1px;text-transform:uppercase;
+         letter-spacing:.8px;transition:color .15s,border-color .15s}
+.gex-tab:hover{color:#e6edf3}
+.gex-tab.active{color:#00c896;border-bottom-color:#00c896}
+.gex-tab-panel{display:none}.gex-tab-panel.active{display:block}
 .chart-card{background:#0d1117;border:1px solid #1e2430;border-radius:6px;padding:14px 16px}
 .chart-card-title{font-size:10px;font-weight:700;color:#6b7280;letter-spacing:1.2px;
                    text-transform:uppercase;margin-bottom:10px}
@@ -894,8 +975,8 @@ nav{flex:1;padding:10px 0}
         <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Symbol</span>
         <select id="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
                 border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;outline:none">
+          <option value="SPX" selected>SPX</option>
           <option value="XSP">XSP</option>
-          <option value="SPX">SPX</option>
           <option value="SPY">SPY</option>
           <option value="QQQ">QQQ</option>
           <option value="NDX">NDX</option>
@@ -914,76 +995,89 @@ nav{flex:1;padding:10px 0}
         <span id="gex-source-badge" style="font-size:10px;color:#6b7280;margin-left:4px"></span>
       </div>
 
-      <!-- IV Skew section -->
-      <div class="gex-section">
-        <div class="gex-section-title">&#128208; Implied Volatility Skew</div>
-        <div class="gex-section-sub" id="gex-iv-sub">Loading&hellip;</div>
-        <div class="gex-row gex-row-2">
-          <div class="chart-card">
-            <div class="chart-card-title">Call IV vs Put IV by Strike</div>
-            <canvas id="gex-iv-chart" height="180"></canvas>
+      <!-- Sub-tabs -->
+      <div class="gex-tabs">
+        <div class="gex-tab active" data-gex-tab="gex">GEX</div>
+        <div class="gex-tab" data-gex-tab="ivskew">IV Skew</div>
+        <div class="gex-tab" data-gex-tab="volume">Volume</div>
+      </div>
+
+      <!-- Tab: GEX -->
+      <div class="gex-tab-panel active" id="gex-panel-gex">
+        <div class="gex-section">
+          <div class="gex-section-sub" id="gex-main-sub">&nbsp;</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+            <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">GEX View</span>
+            <div class="radio-group" id="gex-view-group">
+              <label><input type="radio" name="gex_view" value="split"><span>Calls vs Puts</span></label>
+              <label><input type="radio" name="gex_view" value="net" checked><span>&#11044; Net GEX</span></label>
+              <label><input type="radio" name="gex_view" value="abs"><span>Absolute GEX</span></label>
+            </div>
           </div>
-          <div class="chart-card">
-            <div class="chart-card-title">Open Interest by Strike</div>
-            <canvas id="gex-oi-chart" height="180"></canvas>
+          <div class="gex-row gex-row-main">
+            <div class="chart-card">
+              <div class="chart-card-title" id="gex-chart-title">GEX by Strike &mdash; Net GEX</div>
+              <div style="position:relative;height:260px"><canvas id="gex-main-chart"></canvas></div>
+            </div>
+            <div class="metrics-panel">
+              <div class="metrics-panel-title">&#128202; Total GEX</div>
+              <div class="metric-row">
+                <div class="metric-lbl">Total Call GEX</div>
+                <div class="metric-val pos" id="m-call-gex">&mdash;</div>
+              </div>
+              <div class="metric-row">
+                <div class="metric-lbl">Total Put GEX</div>
+                <div class="metric-val neg" id="m-put-gex">&mdash;</div>
+              </div>
+              <div class="metric-divider"></div>
+              <div class="metric-row">
+                <div class="metric-lbl">Net GEX</div>
+                <div class="metric-val" id="m-net-gex">&mdash;</div>
+              </div>
+              <div class="metric-divider"></div>
+              <div class="metric-row">
+                <div class="metric-lbl">Max GEX Strike</div>
+                <div class="metric-val" id="m-max-strike">&mdash;</div>
+              </div>
+              <div class="metric-divider"></div>
+              <div class="metric-row" style="margin-bottom:0">
+                <div class="metric-lbl">Zero Gamma (Flip) <span title="Strike where dealer GEX transitions from negative to positive" style="cursor:help;color:#3d4451">&#9432;</span></div>
+                <div class="metric-val" id="m-zero-gamma">&mdash;</div>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="chart-card" style="margin-bottom:0">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-            <div class="chart-card-title" style="margin:0">Volume by Strike</div>
-            <div class="radio-group" id="vol-view-group">
+      </div>
+
+      <!-- Tab: IV Skew -->
+      <div class="gex-tab-panel" id="gex-panel-ivskew">
+        <div class="gex-section">
+          <div class="gex-section-sub" id="gex-iv-sub">&nbsp;</div>
+          <div class="gex-row gex-row-2">
+            <div class="chart-card">
+              <div class="chart-card-title">Call IV vs Put IV by Strike</div>
+              <div style="position:relative;height:220px"><canvas id="gex-iv-chart"></canvas></div>
+            </div>
+            <div class="chart-card">
+              <div class="chart-card-title">Open Interest by Strike</div>
+              <div style="position:relative;height:220px"><canvas id="gex-oi-chart"></canvas></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Volume -->
+      <div class="gex-tab-panel" id="gex-panel-volume">
+        <div class="gex-section">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <div class="gex-section-title" style="margin:0">&#128200; Volume by Strike</div>
+            <div class="radio-group" id="vol-view-group" style="margin-bottom:0">
               <label><input type="radio" name="vol_view" value="split"><span>Calls vs Puts</span></label>
               <label><input type="radio" name="vol_view" value="total" checked><span>&#11044; Total Volume</span></label>
             </div>
           </div>
-          <canvas id="gex-vol-chart" height="140"></canvas>
-        </div>
-      </div>
-
-      <div class="gex-divider"></div>
-
-      <!-- GEX Dashboard section -->
-      <div class="gex-section">
-        <div class="gex-section-title">&#128202; Options Gamma Exposure Dashboard</div>
-        <div class="gex-section-sub" id="gex-main-sub">&nbsp;</div>
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-          <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">GEX View</span>
-          <div class="radio-group" id="gex-view-group">
-            <label><input type="radio" name="gex_view" value="split"><span>Calls vs Puts</span></label>
-            <label><input type="radio" name="gex_view" value="net" checked><span>&#11044; Net GEX</span></label>
-            <label><input type="radio" name="gex_view" value="abs"><span>Absolute GEX</span></label>
-          </div>
-        </div>
-        <div class="gex-row gex-row-main">
           <div class="chart-card">
-            <div class="chart-card-title" id="gex-chart-title">GEX by Strike &mdash; Net GEX</div>
-            <canvas id="gex-main-chart" height="260"></canvas>
-          </div>
-          <div class="metrics-panel">
-            <div class="metrics-panel-title">&#128202; Total GEX</div>
-            <div class="metric-row">
-              <div class="metric-lbl">Total Call GEX</div>
-              <div class="metric-val pos" id="m-call-gex">&mdash;</div>
-            </div>
-            <div class="metric-row">
-              <div class="metric-lbl">Total Put GEX</div>
-              <div class="metric-val neg" id="m-put-gex">&mdash;</div>
-            </div>
-            <div class="metric-divider"></div>
-            <div class="metric-row">
-              <div class="metric-lbl">Net GEX</div>
-              <div class="metric-val" id="m-net-gex">&mdash;</div>
-            </div>
-            <div class="metric-divider"></div>
-            <div class="metric-row">
-              <div class="metric-lbl">Max GEX Strike</div>
-              <div class="metric-val" id="m-max-strike">&mdash;</div>
-            </div>
-            <div class="metric-divider"></div>
-            <div class="metric-row" style="margin-bottom:0">
-              <div class="metric-lbl">Zero Gamma (Flip) <span title="Strike where dealer GEX transitions from negative to positive" style="cursor:help;color:#3d4451">&#9432;</span></div>
-              <div class="metric-val" id="m-zero-gamma">&mdash;</div>
-            </div>
+            <div style="position:relative;height:260px"><canvas id="gex-vol-chart"></canvas></div>
           </div>
         </div>
       </div>
@@ -1363,14 +1457,17 @@ function renderIvChart(series, spot) {
   const labels = series.map(s => s.strike);
   const ds = [
     { label: 'Call IV', data: series.map(s => s.call_iv || null),
-      borderColor: '#00c896', pointRadius: 3, pointHoverRadius: 5,
-      borderWidth: 2, tension: 0.3, fill: false },
+      borderColor: 'green', backgroundColor: 'rgba(0,128,0,0.1)',
+      pointRadius: 4, pointHoverRadius: 6, borderWidth: 2, tension: 0, fill: false },
     { label: 'Put IV',  data: series.map(s => s.put_iv  || null),
-      borderColor: '#e8423a', pointRadius: 3, pointHoverRadius: 5,
-      borderWidth: 2, tension: 0.3, fill: false },
+      borderColor: 'red', backgroundColor: 'rgba(255,0,0,0.1)',
+      pointRadius: 4, pointHoverRadius: 6, borderWidth: 2, tension: 0, fill: false },
   ];
   const opts = _baseOpts();
+  opts.scales.x.title = { display: true, text: 'Strike Price', color: '#6b7280' };
+  opts.scales.y.title = { display: true, text: 'Implied Volatility (%)', color: '#6b7280' };
   opts.scales.y.ticks.callback = v => v.toFixed(1) + '%';
+  opts.plugins.tooltip.mode = 'index';
   opts.plugins.tooltip.callbacks = { label: ctx => ctx.dataset.label + ': ' + (ctx.parsed.y || 0).toFixed(2) + '%' };
   opts.plugins.vline = spot != null ? _vline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
   if (gexIvChart) { gexIvChart.data.labels = labels; gexIvChart.data.datasets = ds; gexIvChart.update(); return; }
@@ -1379,12 +1476,16 @@ function renderIvChart(series, spot) {
 
 function renderOiChart(series, spot) {
   const labels = series.map(s => s.strike);
+  // Calls positive (up), puts negated (down) — mirrored bars like reference barmode='relative'
   const ds = [
-    { label: 'Call OI', data: series.map(s => s.call_oi),  backgroundColor: '#00c896aa' },
-    { label: 'Put OI',  data: series.map(s => -s.put_oi),  backgroundColor: '#e8423aaa' },
+    { label: 'Call OI', data: series.map(s => s.call_oi),  backgroundColor: 'green' },
+    { label: 'Put OI',  data: series.map(s => -s.put_oi),  backgroundColor: 'red' },
   ];
   const opts = _baseOpts();
-  opts.scales.y.stacked = false;
+  opts.scales.x.title = { display: true, text: 'Strike', color: '#6b7280' };
+  opts.scales.y.title = { display: true, text: 'Open Interest', color: '#6b7280' };
+  opts.scales.x.stacked = true;
+  opts.scales.y.stacked = true;
   opts.plugins.tooltip.callbacks = {
     label: ctx => (ctx.dataset.label || '') + ': ' + Math.abs(ctx.parsed.y).toLocaleString()
   };
@@ -1397,15 +1498,19 @@ function renderVolChart(series, spot, mode) {
   const labels = series.map(s => s.strike);
   let ds;
   if (mode === 'split') {
+    // Calls positive (lightgreen up), puts negated (lightcoral down) — matches reference
     ds = [
-      { label: 'Call Vol', data: series.map(s => s.call_vol), backgroundColor: '#00c896aa' },
-      { label: 'Put Vol',  data: series.map(s => s.put_vol),  backgroundColor: '#e8423aaa' },
+      { label: 'Call Volume', data: series.map(s => s.call_vol),  backgroundColor: 'lightgreen' },
+      { label: 'Put Volume',  data: series.map(s => -s.put_vol),  backgroundColor: 'lightcoral' },
     ];
   } else {
-    ds = [{ label: 'Total Vol', data: series.map(s => s.total_vol), backgroundColor: '#9b59b6aa' }];
+    ds = [{ label: 'Total Volume', data: series.map(s => s.total_vol), backgroundColor: 'purple' }];
   }
   const opts = _baseOpts();
-  opts.plugins.tooltip.callbacks = { label: ctx => (ctx.dataset.label||'') + ': ' + ctx.parsed.y.toLocaleString() };
+  opts.scales.x.title = { display: true, text: 'Strike', color: '#6b7280' };
+  opts.scales.y.title = { display: true, text: 'Volume', color: '#6b7280' };
+  if (mode === 'split') { opts.scales.x.stacked = true; opts.scales.y.stacked = true; }
+  opts.plugins.tooltip.callbacks = { label: ctx => (ctx.dataset.label||'') + ': ' + Math.abs(ctx.parsed.y).toLocaleString() };
   opts.plugins.vline = spot != null ? _vline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
   if (gexVolChart) { gexVolChart.destroy(); gexVolChart = null; }
   gexVolChart = new Chart(document.getElementById('gex-vol-chart'), { type: 'bar', data: { labels, datasets: ds }, options: opts });
@@ -1413,32 +1518,39 @@ function renderVolChart(series, spot, mode) {
 
 function renderGexMainChart(series, spot, zero, mode) {
   const labels = series.map(s => s.strike);
-  let ds, titleText;
+  let ds, titleText, stacked = false;
   if (mode === 'split') {
+    // Calls positive (green up), puts already negative in data (red down) — relative stacked bars
     ds = [
-      { label: 'Call GEX', data: series.map(s => s.call_gex), backgroundColor: '#00c896aa' },
-      { label: 'Put GEX',  data: series.map(s => s.put_gex),  backgroundColor: '#e8423aaa' },
+      { label: 'Call GEX', data: series.map(s => s.call_gex), backgroundColor: 'green' },
+      { label: 'Put GEX',  data: series.map(s => s.put_gex),  backgroundColor: 'red' },
     ];
     titleText = 'GEX by Strike — Calls vs Puts';
+    stacked = true;
   } else if (mode === 'abs') {
-    ds = [{ label: 'Abs GEX', data: series.map(s => s.abs_gex), backgroundColor: '#4a90d9aa' }];
+    ds = [{ label: '|Net GEX|', data: series.map(s => s.abs_gex), backgroundColor: 'blue' }];
     titleText = 'GEX by Strike — Absolute GEX';
   } else {
-    ds = [{ label: 'Net GEX', data: series.map(s => s.net_gex),
-            backgroundColor: series.map(s => s.net_gex >= 0 ? '#00c896aa' : '#e8423aaa') }];
-    titleText = 'GEX by Strike — Net GEX';
+    // Net GEX: green where positive (call-heavy), red where negative (put-heavy)
+    ds = [{ label: 'Net GEX',
+            data: series.map(s => s.net_gex),
+            backgroundColor: series.map(s => s.net_gex >= 0 ? 'green' : 'red') }];
+    titleText = 'GEX by Strike — Net GEX (Green=Call Heavy, Red=Put Heavy)';
   }
   document.getElementById('gex-chart-title').textContent = titleText;
   const opts = _baseOpts();
+  opts.scales.x.title = { display: true, text: 'Strike Price', color: '#6b7280' };
+  opts.scales.y.title = { display: true, text: 'Gamma Exposure ($)', color: '#6b7280' };
+  if (stacked) { opts.scales.x.stacked = true; opts.scales.y.stacked = true; }
   opts.scales.y.ticks.callback = v => fGex(v);
   opts.plugins.tooltip.callbacks = {
     label: ctx => (ctx.dataset.label||'') + ': ' + fGex(ctx.parsed.y)
   };
-  const plugins = [];
-  if (spot != null)  plugins.push(_vline(spot,  '$' + spot.toFixed(2),  '#f5a623'));
-  if (zero != null)  plugins.push(_vline(zero,  'Zero Γ: $' + zero.toFixed(2), '#9b59b6'));
+  const vlinePlugins = [];
+  if (spot != null) vlinePlugins.push(_vline(spot, '$' + spot.toFixed(2), 'orange'));
+  if (zero != null) vlinePlugins.push(_vline(zero, 'Zero Γ: $' + zero.toFixed(2), 'purple'));
   opts.plugins.customVlines = { id: 'customVlines', beforeDatasetsDraw(chart) {
-    plugins.forEach(p => p.beforeDatasetsDraw(chart));
+    vlinePlugins.forEach(p => p.beforeDatasetsDraw(chart));
   }};
   if (gexMainChart) { gexMainChart.destroy(); gexMainChart = null; }
   gexMainChart = new Chart(document.getElementById('gex-main-chart'),
@@ -1483,7 +1595,7 @@ function renderGex(d) {
 }
 
 function _initGexSymbol() {
-  // Pre-select the dropdown to the trading symbol if it's in the list
+  // Sync dropdown to last-loaded symbol; otherwise leave SPX (the HTML default)
   if (!gexData) return;
   const sym = (gexData.symbol || '').toUpperCase();
   const sel = document.getElementById('gex-symbol-select');
@@ -1495,11 +1607,10 @@ function _initGexSymbol() {
 
 function gexSymbol() {
   const custom = (document.getElementById('gex-symbol-custom').value || '').trim().toUpperCase();
-  return custom || document.getElementById('gex-symbol-select').value || 'XSP';
+  return custom || document.getElementById('gex-symbol-select').value || 'SPX';
 }
 
 async function fetchGex() {
-  if (!document.getElementById('view-gex').classList.contains('active')) return;
   const sym = gexSymbol();
   const badge = document.getElementById('gex-source-badge');
   badge.textContent = 'Loading…';
@@ -1520,6 +1631,18 @@ async function fetchGex() {
   } catch(_) { badge.textContent = 'error'; }
 }
 
+// GEX sub-tabs
+document.querySelectorAll('.gex-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.gex-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.gex-tab-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('gex-panel-' + tab.dataset.gexTab).classList.add('active');
+    // resize charts that were rendered while their panel was hidden
+    [gexMainChart, gexIvChart, gexOiChart, gexVolChart].forEach(c => { if (c) c.resize(); });
+  });
+});
+
 // Symbol selector
 document.getElementById('gex-load-btn').addEventListener('click', fetchGex);
 document.getElementById('gex-symbol-select').addEventListener('change', () => {
@@ -1538,6 +1661,7 @@ document.querySelectorAll('input[name="vol_view"]').forEach(el =>
 
 // ── auto-refresh ──────────────────────────────────────────────────────────────
 fetchData();
+fetchGex();
 setInterval(() => {
   cd--;
   document.getElementById('scountdown').textContent = 'Refresh in ' + cd + 's';
@@ -1576,6 +1700,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/gex"):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             sym = (qs.get("symbol") or [None])[0]
+            # Notify streamer to switch GEX subscription channel to this symbol
+            if sym:
+                _notify_streamer_gex_symbol(sym)
             try:
                 result = _build_gex_data(sym)
             except Exception as exc:

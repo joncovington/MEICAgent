@@ -82,6 +82,8 @@ python src/db.py save_trade --data '<JSON with all entry fields>'
 ```
 Required fields: `ic_order_id`, `symbol`, `put_strike`, `call_strike`, `wing_width`, `put_credit`, `call_credit`, `net_credit`, `quantity`, `put_delta_at_entry`, `call_delta_at_entry`, `long_put_delta_at_entry`, `long_call_delta_at_entry`, `underlying_price_entry`, `iv_rank_at_entry`, `session_quality`, `iv_skew_signal`, `price_action_signal`, `ai_entry_reasoning`, `stop_trigger_original`, `stop_limit_original`, `stop_trigger_current`, `stop_limit_current`.
 
+`stop_trigger_original` and `stop_trigger_current` both start equal to config's `stop_trigger_ratio` (0.95); `stop_limit_original` and `stop_limit_current` both start equal to config's `stop_limit_ratio` (1.02). The `_current` fields are the ones stop-management reads and may tighten over time (Step 6 of stop-management); `_original` is kept for reference/audit.
+
 Record `entry_price_strategy_used` and `entry_limit_price` so the EOD report can track fill rates per strategy.
 
 8. **Log the entry**:

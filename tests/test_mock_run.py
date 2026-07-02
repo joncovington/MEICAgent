@@ -85,8 +85,12 @@ async def run_test(agent_config: dict) -> dict:
 
     # ── Phase 3: Strategy Candidates ─────────────────────────────────────────
     print("Phase 3 — Strategy Candidates...", flush=True)
-    widths = agent_config.get("wing_width_candidates", [1, 2, 3, 5])
-    short_delta = agent_config.get("delta_target", 0.15)
+    # The agent decides wing width dynamically now (no fixed candidate list in
+    # config) — exercise a representative spread up to max_wing_width so the
+    # smoke test still covers multiple widths for the entry-decision phase.
+    max_width = agent_config.get("max_wing_width", 10)
+    widths = sorted({w for w in (1, 2, 3, 5, max_width) if w <= max_width})
+    short_delta = agent_config.get("delta_target", 0.18)
     strat_results = await asyncio.gather(*[
         call(mcp, "get_strategies", {
             "symbol": symbol, "target_dte": 0,

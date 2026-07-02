@@ -179,7 +179,7 @@ class TestSyncGetOptionChain:
     def teardown_method(self):
         self.conn.close()
 
-    def _seed_chain(self, count: int = 4):
+    def _seed_chain(self, count: int = 4, underlying: str = "XSP"):
         now = time.time()
         strikes = [585, 590, 595, 600]
         for k in range(count):
@@ -191,10 +191,10 @@ class TestSyncGetOptionChain:
                        "option_type": otype,
                        "strike_price": str(strike)}
                 self.conn.execute(
-                    "INSERT INTO stream_chain (streamer_symbol, expiration, data_json, updated_at) "
-                    "VALUES (?, ?, ?, ?) ON CONFLICT(streamer_symbol) DO UPDATE SET "
+                    "INSERT INTO stream_chain (streamer_symbol, expiration, underlying_symbol, data_json, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?) ON CONFLICT(streamer_symbol) DO UPDATE SET "
                     "data_json=excluded.data_json, updated_at=excluded.updated_at",
-                    (sym, self.exp, json.dumps(opt), now),
+                    (sym, self.exp, underlying, json.dumps(opt), now),
                 )
         self.conn.commit()
 
@@ -301,10 +301,10 @@ class TestSyncGetStrategies:
                 "shares_per_contract": 100,
             }
             self.conn.execute(
-                "INSERT INTO stream_chain (streamer_symbol, expiration, data_json, updated_at) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT(streamer_symbol) DO UPDATE SET "
+                "INSERT INTO stream_chain (streamer_symbol, expiration, underlying_symbol, data_json, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(streamer_symbol) DO UPDATE SET "
                 "data_json=excluded.data_json, updated_at=excluded.updated_at",
-                (sym, self.exp, json.dumps(opt), now),
+                (sym, self.exp, "XSP", json.dumps(opt), now),
             )
             self.conn.execute(
                 "INSERT INTO stream_greeks (symbol, delta, gamma, theta, vega, rho, iv, price, updated_at) "
@@ -351,9 +351,11 @@ class TestSyncGetStrategies:
         assert result is None
 
     def test_stale_greeks_skipped(self):
-        # Backdate greeks past 10s TTL — should fall back to None (no valid greeks)
+        # Greeks use a 2700s (45-min) TTL here, not the 10s quote/trade TTL — DXLink
+        # publishes Greeks in infrequent batches, not tick-by-tick. Backdate past
+        # that window so the cache is treated as having no valid greeks.
         self.conn.execute(
-            "UPDATE stream_greeks SET updated_at = ?", (time.time() - 15,)
+            "UPDATE stream_greeks SET updated_at = ?", (time.time() - 2701,)
         )
         self.conn.commit()
         result = self.h._sync_get_strategies({"symbol": "XSP", "wing_width": 1, "short_delta": 0.15})

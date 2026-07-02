@@ -45,8 +45,8 @@ Key fields to update in `config.json`:
 | Field | Description |
 |---|---|
 | `symbol` | Underlying to trade. Equity: `XSP`, `SPX`, `NDX`, `RUT`. Futures: `/MES`, `/ES`, `/MNQ`, `/NQ` |
-| `delta_target` | Short strike delta target (default `0.15`) |
-| `wing_width_candidates` | Wing widths to evaluate per entry (agent picks the best fit) |
+| `delta_target` | Short strike delta target (default `0.18`) |
+| `max_wing_width` | Upper bound (points) on spread width; the agent decides the actual wing width per entry rather than picking from a fixed list |
 | `quantity` | Number of contracts per IC leg |
 | `max_entries_per_day` | Hard cap on entries (`-1` = no cap, rely on AI + buying power) |
 | `entry_window_start` | Earliest time to enter new ICs in HH:MM ET (default `"09:45"`) |

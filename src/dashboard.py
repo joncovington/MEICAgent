@@ -76,74 +76,136 @@ def _wl_ratio(wins: int, losses: int) -> float | None:
     return round((wins or 0) / total * 100, 1) if total > 0 else None
 
 
-def _today_stats(conn: sqlite3.Connection, today: str) -> dict:
-    r = _one(conn, """
-        SELECT COALESCE(SUM(pnl), 0)                                    AS net_pnl,
-               COUNT(*)                                                  AS total_trades,
-               SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END)        AS wins,
-               SUM(CASE WHEN status = 'stopped' THEN 1 ELSE 0 END)        AS losses
-        FROM ic_trades
-        WHERE trade_date = ?
-          AND status NOT IN ('cancelled', 'pending', 'partial_entry')
-    """, (today,)) or {}
+def _fetch_spread_legs(conn: sqlite3.Connection, ic_order_ids: list[str]) -> dict[str, dict[str, dict]]:
+    """Return {ic_order_id: {'put': leg_row, 'call': leg_row}} for the given IC ids.
+    Sides with no recorded leg (legacy trades, or a side still open) are simply absent."""
+    if not ic_order_ids:
+        return {}
+    placeholders = ", ".join(["?"] * len(ic_order_ids))
+    rows = _rows(conn,
+        f"SELECT * FROM ic_spread_legs WHERE ic_order_id IN ({placeholders})",
+        ic_order_ids)
+    legs: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        legs.setdefault(r["ic_order_id"], {})[r["side"]] = r
+    return legs
+
+
+def _leg_outcome(leg_status: str | None, leg_pnl: float | None) -> tuple[int, int]:
+    """Return (win, loss) for a single resolved spread leg; (0, 0) if still open/unresolved."""
+    status = (leg_status or "").lower()
+    if status == "expired":
+        return (1, 0)
+    if status in ("force_closed", "closed_profit_target"):
+        return (1, 0) if (leg_pnl is None or leg_pnl >= 0) else (0, 1)
+    if status == "stopped":
+        return (0, 1)
+    return (0, 0)
+
+
+def _spread_wins_losses(trade_status: str, trade_pnl: float | None, put_leg: dict | None, call_leg: dict | None) -> tuple[int, int]:
+    """Return (spread_wins, spread_losses) for one IC, counting each leg separately.
+    Prefers real per-leg records. A side with no leg row is either (a) part of a
+    legacy trade recorded before per-leg tracking existed — both sides then share
+    the whole-trade guess — or (b) a side that closed together with its sibling in
+    the same event (expired/force-closed together) and so was never given its own
+    row — it inherits that shared outcome. A side still genuinely open (trade status
+    'partial'/'open') is left uncounted until it resolves."""
+    status = (trade_status or "").lower()
+
+    if put_leg is None and call_leg is None:
+        if status == "expired":
+            return (2, 0)
+        if status in ("force_closed", "closed_profit_target"):
+            return (2, 0) if (trade_pnl or 0) >= 0 else (0, 2)
+        if status in ("stopped", "partial"):
+            return (0, 2)
+        return (0, 0)
+
+    def side_outcome(leg: dict | None) -> tuple[int, int]:
+        if leg is not None:
+            return _leg_outcome(leg.get("status"), leg.get("pnl"))
+        if status == "expired":
+            return (1, 0)
+        if status in ("force_closed", "closed_profit_target"):
+            return (1, 0) if (trade_pnl or 0) >= 0 else (0, 1)
+        return (0, 0)
+
+    pw, pl_ = side_outcome(put_leg)
+    cw, cl_ = side_outcome(call_leg)
+    return (pw + cw, pl_ + cl_)
+
+
+def _stats_for_period(conn: sqlite3.Connection, start: str | None = None, end: str | None = None) -> dict:
+    """Compute stats for a date range, querying ic_trades directly for accuracy.
+    start/end are inclusive YYYY-MM-DD strings; omit to mean unbounded."""
+    where = ["status NOT IN ('cancelled', 'pending', 'partial_entry')"]
+    params: list = []
+    if start:
+        where.append("trade_date >= ?")
+        params.append(start)
+    if end:
+        where.append("trade_date <= ?")
+        params.append(end)
+    rows = _rows(conn,
+        f"SELECT ic_order_id, pnl, status FROM ic_trades WHERE {' AND '.join(where)}",
+        params)
+    legs = _fetch_spread_legs(conn, [r["ic_order_id"] for r in rows])
+    net_pnl = 0.0
+    total_trades = 0
+    wins = 0
+    losses = 0
+    for r in rows:
+        net_pnl += float(r.get("pnl") or 0)
+        total_trades += 1
+        trade_legs = legs.get(r["ic_order_id"], {})
+        w, l = _spread_wins_losses(r.get("status"), r.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
+        wins += w
+        losses += l
     result = {
-        "net_pnl":      round(float(r.get("net_pnl") or 0), 2),
-        "total_trades": int(r.get("total_trades") or 0),
-        "wins":         int(r.get("wins") or 0),
-        "losses":       int(r.get("losses") or 0),
+        "net_pnl":      round(net_pnl, 2),
+        "total_trades": total_trades,
+        "wins":         wins,
+        "losses":       losses,
     }
-    result["wl_ratio"] = _wl_ratio(result["wins"], result["losses"])
-    return result
-
-
-def _historical_stats(conn: sqlite3.Connection, start: str, today: str) -> dict:
-    r = _one(conn, """
-        SELECT COALESCE(SUM(net_pnl), 0)                            AS net_pnl,
-               COALESCE(SUM(entries_filled), 0)                     AS total_trades,
-               COALESCE(SUM(win_count), 0)                          AS wins,
-               COALESCE(SUM(entries_filled - win_count), 0)         AS losses
-        FROM daily_summary
-        WHERE summary_date >= ? AND summary_date < ?
-    """, (start, today)) or {}
-    return {
-        "net_pnl":      float(r.get("net_pnl") or 0),
-        "total_trades": int(r.get("total_trades") or 0),
-        "wins":         int(r.get("wins") or 0),
-        "losses":       int(r.get("losses") or 0),
-    }
-
-
-def _alltime_stats(conn: sqlite3.Connection, today: str) -> dict:
-    r = _one(conn, """
-        SELECT COALESCE(SUM(net_pnl), 0)                            AS net_pnl,
-               COALESCE(SUM(entries_filled), 0)                     AS total_trades,
-               COALESCE(SUM(win_count), 0)                          AS wins,
-               COALESCE(SUM(entries_filled - win_count), 0)         AS losses
-        FROM daily_summary
-        WHERE summary_date < ?
-    """, (today,)) or {}
-    return {
-        "net_pnl":      float(r.get("net_pnl") or 0),
-        "total_trades": int(r.get("total_trades") or 0),
-        "wins":         int(r.get("wins") or 0),
-        "losses":       int(r.get("losses") or 0),
-    }
-
-
-def _merge(hist: dict, today: dict) -> dict:
-    result = {
-        "net_pnl":      round(hist.get("net_pnl", 0) + today.get("net_pnl", 0), 2),
-        "total_trades": hist.get("total_trades", 0) + today.get("total_trades", 0),
-        "wins":         hist.get("wins", 0) + today.get("wins", 0),
-        "losses":       hist.get("losses", 0) + today.get("losses", 0),
-    }
-    result["wl_ratio"] = _wl_ratio(result["wins"], result["losses"])
+    result["wl_ratio"] = _wl_ratio(wins, losses)
     return result
 
 
 # ── Per-spread status ─────────────────────────────────────────────────────────
 
-def _spread_statuses(trade: dict) -> tuple[dict, dict]:
+def _badge(label: str, btype: str) -> dict:
+    return {"label": label, "type": btype}
+
+
+def _leg_badge(leg: dict | None) -> dict | None:
+    """Badge for a single resolved leg, or None if there's no per-leg record for it."""
+    if leg is None:
+        return None
+    status = (leg.get("status") or "").lower()
+    exit_time = leg.get("exit_time") or ""
+    time_str = ""
+    if exit_time:
+        s = str(exit_time).replace("T", " ")
+        time_str = s[11:16] if len(s) >= 16 else ""
+    if status == "stopped":
+        return _badge(f"STOPPED {time_str}".strip(), "stopped")
+    if status == "expired":
+        return _badge("expired", "expired")
+    if status in ("force_closed", "closed_profit_target"):
+        return _badge("force closed", "force_closed")
+    if status == "open":
+        return _badge("monitoring", "monitoring")
+    return _badge(status or "unknown", "unknown")
+
+
+def _spread_statuses(trade: dict, put_leg: dict | None = None, call_leg: dict | None = None) -> tuple[dict, dict]:
+    """Per-spread status badges. Uses real ic_spread_legs rows when available. A side
+    with no leg row is either (a) part of a legacy trade recorded before per-leg
+    tracking existed — both sides then show the same whole-trade-derived badge — or
+    (b) a side that closed together with its sibling (expired/force-closed together,
+    never given its own row) and so inherits that shared badge, or is genuinely
+    still open and shows 'monitoring'."""
     status = (trade.get("status") or "").lower()
     exit_time = trade.get("exit_time") or ""
     time_str = ""
@@ -151,42 +213,42 @@ def _spread_statuses(trade: dict) -> tuple[dict, dict]:
         s = str(exit_time).replace("T", " ")
         time_str = s[11:16] if len(s) >= 16 else ""
 
-    def b(label: str, btype: str) -> dict:
-        return {"label": label, "type": btype}
+    monitoring = _badge("monitoring", "monitoring")
+    expired    = _badge("expired",    "expired")
+    pending    = _badge("pending",    "pending")
+    cancelled  = _badge("cancelled",  "cancelled")
+    force      = _badge("force closed", "force_closed")
+    stopped    = _badge(f"STOPPED {time_str}".strip(), "stopped")
 
-    monitoring = b("monitoring", "monitoring")
-    expired    = b("expired",    "expired")
-    pending    = b("pending",    "pending")
-    cancelled  = b("cancelled",  "cancelled")
-    force      = b("force closed", "force_closed")
-    stopped    = b(f"STOPPED {time_str}".strip(), "stopped")
+    if put_leg is None and call_leg is None:
+        if status in ("pending", "partial_entry"):
+            return pending, pending
+        if status == "open":
+            return monitoring, monitoring
+        if status == "expired":
+            return expired, expired
+        if status == "cancelled":
+            return cancelled, cancelled
+        if status == "force_closed":
+            return force, force
+        if status in ("stopped", "partial"):
+            return stopped, stopped
+        return _badge(status, "unknown"), _badge(status, "unknown")
 
-    if status in ("pending", "partial_entry"):
-        return pending, pending
-    if status == "open":
-        return monitoring, monitoring
-    if status == "expired":
-        return expired, expired
-    if status == "cancelled":
-        return cancelled, cancelled
-    if status == "force_closed":
-        return force, force
-    if status in ("stopped", "partial"):
-        ea = trade.get("exit_analysis")
-        if ea:
-            try:
-                obj = json.loads(ea) if isinstance(ea, str) else ea
-                which = (obj.get("stopped_spread") or "").lower()
-                if which == "put":
-                    remaining = monitoring if status == "partial" else expired
-                    return stopped, remaining
-                if which == "call":
-                    remaining = monitoring if status == "partial" else expired
-                    return remaining, stopped
-            except (json.JSONDecodeError, AttributeError):
-                pass
-        return stopped, stopped
-    return b(status, "unknown"), b(status, "unknown")
+    def side_badge(leg: dict | None) -> dict:
+        if leg is not None:
+            return _leg_badge(leg)
+        if status == "expired":
+            return expired
+        if status == "force_closed":
+            return force
+        if status == "cancelled":
+            return cancelled
+        if status in ("pending", "partial_entry"):
+            return pending
+        return monitoring
+
+    return side_badge(put_leg), side_badge(call_leg)
 
 
 # ── Log tail ──────────────────────────────────────────────────────────────────
@@ -225,14 +287,13 @@ def _build_api_data() -> dict:
 
     conn = _connect()
     today = _today()
-    t_stats = _today_stats(conn, today)
 
     stats = {
-        "today":    t_stats,
-        "week":     _merge(_historical_stats(conn, _week_start(),  today), t_stats),
-        "month":    _merge(_historical_stats(conn, _month_start(), today), t_stats),
-        "year":     _merge(_historical_stats(conn, _year_start(),  today), t_stats),
-        "all_time": _merge(_alltime_stats(conn, today),                    t_stats),
+        "today":    _stats_for_period(conn, start=today, end=today),
+        "week":     _stats_for_period(conn, start=_week_start(),  end=today),
+        "month":    _stats_for_period(conn, start=_month_start(), end=today),
+        "year":     _stats_for_period(conn, start=_year_start(),  end=today),
+        "all_time": _stats_for_period(conn, end=today),
     }
 
     raw_trades = _rows(conn, """
@@ -242,16 +303,18 @@ def _build_api_data() -> dict:
                iv_rank_at_entry, iv_skew_signal, price_action_signal,
                stop_trigger_current, stop_limit_current, stop_adjustment_count,
                exit_time, exit_price, exit_reason, pnl, fees,
-               ai_entry_reasoning, exit_analysis
+               ai_entry_reasoning
         FROM ic_trades
         WHERE trade_date = ?
         ORDER BY entry_time
     """, (today,))
 
+    today_legs = _fetch_spread_legs(conn, [t["ic_order_id"] for t in raw_trades])
     trades = []
     for t in raw_trades:
-        put_s, call_s = _spread_statuses(t)
-        row = {k: v for k, v in t.items() if k != "exit_analysis"}
+        trade_legs = today_legs.get(t["ic_order_id"], {})
+        put_s, call_s = _spread_statuses(t, trade_legs.get("put"), trade_legs.get("call"))
+        row = dict(t)
         row["put_status"]  = put_s
         row["call_status"] = call_s
         trades.append(row)
@@ -326,6 +389,45 @@ def _build_api_data() -> dict:
         "fee_drag_pct":  round(fees / gross * 100, 1) if gross > 0 else None,
     }
 
+    raw_recent = _rows(conn, """
+        SELECT trade_date, ic_order_id, entry_time, exit_time,
+               put_strike, call_strike, wing_width,
+               net_credit, put_credit, call_credit,
+               status, exit_reason, pnl, fees, session_quality
+        FROM ic_trades
+        WHERE status NOT IN ('cancelled','pending','partial_entry')
+        ORDER BY trade_date DESC, entry_time DESC
+        LIMIT 60
+    """)
+
+    recent_legs = _fetch_spread_legs(conn, [t["ic_order_id"] for t in raw_recent])
+    recent_trades = []
+    for t in raw_recent:
+        trade_legs = recent_legs.get(t["ic_order_id"], {})
+        put_s, call_s = _spread_statuses(t, trade_legs.get("put"), trade_legs.get("call"))
+        w, l = _spread_wins_losses(t.get("status"), t.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
+        recent_trades.append({
+            "trade_date":    t.get("trade_date"),
+            "ic_order_id":   t.get("ic_order_id"),
+            "entry_time":    t.get("entry_time"),
+            "exit_time":     t.get("exit_time"),
+            "put_strike":    t.get("put_strike"),
+            "call_strike":   t.get("call_strike"),
+            "wing_width":    t.get("wing_width"),
+            "net_credit":    t.get("net_credit"),
+            "put_credit":    t.get("put_credit"),
+            "call_credit":   t.get("call_credit"),
+            "status":        t.get("status"),
+            "exit_reason":   t.get("exit_reason"),
+            "pnl":           t.get("pnl"),
+            "fees":          t.get("fees"),
+            "session_quality": t.get("session_quality"),
+            "put_status":    put_s,
+            "call_status":   call_s,
+            "spread_wins":   w,
+            "spread_losses": l,
+        })
+
     conn.close()
 
     return {
@@ -337,10 +439,11 @@ def _build_api_data() -> dict:
         "last_loop":  last_loop,
         "nlv_series": nlv_series,
         "analytics": {
-            "by_session":  by_session,
-            "by_exit":     by_exit,
-            "by_iv":       by_iv,
-            "fee_summary": fee_summary,
+            "by_session":    by_session,
+            "by_exit":       by_exit,
+            "by_iv":         by_iv,
+            "fee_summary":   fee_summary,
+            "recent_trades": recent_trades,
         },
     }
 
@@ -475,24 +578,34 @@ def _build_gex_data(symbol: str | None = None) -> dict:
     expiration: str | None = None
     greeks: dict[str, dict] = {}
     quotes: dict[str, dict] = {}
+    oi_cache: dict[str, int] = {}
     source = "stream_cache"
 
     if cache_conn:
         exp_row = cache_conn.execute(
-            "SELECT expiration FROM stream_chain "
-            "WHERE streamer_symbol LIKE ? "
+            "SELECT expiration FROM stream_chain WHERE underlying_symbol = ? "
             "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1",
-            (f".{symbol}%",),
+            (symbol,),
         ).fetchone()
         if exp_row:
             expiration = exp_row["expiration"]
+            # underlying_symbol filter matters: XSP and SPX (and other index
+            # symbols) share the same 0DTE expiration date, so an
+            # expiration-only WHERE clause mixes both chains together.
             chain_rows = cache_conn.execute(
-                "SELECT data_json FROM stream_chain WHERE expiration = ?", (expiration,)
+                "SELECT data_json FROM stream_chain WHERE expiration = ? AND underlying_symbol = ?",
+                (expiration, symbol),
             ).fetchall()
             for r in cache_conn.execute("SELECT * FROM stream_greeks").fetchall():
                 greeks[r["symbol"]] = dict(r)
             for r in cache_conn.execute("SELECT * FROM stream_quotes").fetchall():
                 quotes[r["symbol"]] = dict(r)
+            # Live open interest comes from DXLink Summary events (stream_oi),
+            # not the static chain snapshot — the chain's own open_interest
+            # field is never populated by the initial metadata fetch, so
+            # reading it directly always yields zero.
+            for r in cache_conn.execute("SELECT * FROM stream_oi").fetchall():
+                oi_cache[r["symbol"]] = r["open_interest"]
 
     if cache_conn:
         cache_conn.close()
@@ -560,7 +673,10 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         otype  = (opt.get("option_type") or "").upper()
         sym    = opt.get("streamer_symbol") or ""
         mult   = float(opt.get("shares_per_contract") or 100)
-        oi     = int(opt.get("open_interest") or 0)
+        if source == "stream_cache":
+            oi = int(oi_cache.get(sym) or 0)
+        else:
+            oi = int(opt.get("open_interest") or 0)
         vol    = int(opt.get("average_daily_volume") or 0)
 
         g = greeks.get(sym, {})
@@ -570,7 +686,14 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         # cache stores raw decimal (0.20); REST path stores already-pct (20.0)
         iv = raw_iv if (source == "rest" or raw_iv > 1) else raw_iv * 100
 
-        gex = gamma * oi * mult * (gex_spot or 0)
+        # Standard dollar-gamma-per-1%-move formula: gamma * OI * contract
+        # size * spot^2 * 0.01. Must match tt.py's _compute_gex exactly —
+        # this used to be gamma * oi * mult * spot (missing the spot^2 and
+        # 0.01 scale), which understated GEX by roughly spot/100 (~75x for
+        # SPX at 7483) relative to the number the trading loop actually
+        # gates entries on via `get_gex`.
+        _s = gex_spot or 0
+        gex = gamma * oi * mult * _s * _s * 0.01
         if "P" in otype:
             gex = -gex
 
@@ -873,13 +996,13 @@ nav{flex:1;padding:10px 0}
               <td id="tr-year"></td><td id="tr-all"></td>
             </tr>
             <tr>
-              <td class="lbl">Wins</td>
+              <td class="lbl">Wins (spreads)</td>
               <td class="today-col" id="w-today"></td>
               <td id="w-week"></td><td id="w-month"></td>
               <td id="w-year"></td><td id="w-all"></td>
             </tr>
             <tr>
-              <td class="lbl">Losses</td>
+              <td class="lbl">Losses (spreads)</td>
               <td class="today-col" id="l-today"></td>
               <td id="l-week"></td><td id="l-month"></td>
               <td id="l-year"></td><td id="l-all"></td>
@@ -961,6 +1084,20 @@ nav{flex:1;padding:10px 0}
             <div class="fee-card"><div class="fee-lbl">Net P&amp;L</div><div class="fee-val" id="f-net">&mdash;</div></div>
             <div class="fee-card"><div class="fee-lbl">Fee Drag</div><div class="fee-val warn" id="f-drag">&mdash;</div></div>
           </div>
+        </div>
+      </div>
+      <div class="apanel" style="margin-top:10px">
+        <div class="ptitle">Recent Trades (last 60)</div>
+        <div style="overflow-x:auto">
+          <table class="atable" id="recent-tbl" style="width:100%;min-width:700px">
+            <thead><tr>
+              <th>Date</th><th>Strikes</th><th>Width</th>
+              <th>Credit</th><th>Put</th><th>Put $</th>
+              <th>Call</th><th>Call $</th>
+              <th>P&amp;L</th><th>Session</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -1310,6 +1447,29 @@ function renderHistory(d) {
   fnet.textContent  = f.net_pnl != null ? fMoney(f.net_pnl) : '—';
   fnet.className    = 'fee-val ' + (f.net_pnl >= 0 ? 'pos' : 'neg');
   document.getElementById('f-drag').textContent = f.fee_drag_pct != null ? f.fee_drag_pct.toFixed(1) + '%' : '—';
+
+  // Recent trades
+  const rb = document.querySelector('#recent-tbl tbody');
+  const rt = a.recent_trades || [];
+  rb.innerHTML = !rt.length ? '<tr><td colspan="10" class="empty">No trade history</td></tr>'
+    : rt.map(t => {
+        const pnlNet = (t.pnl != null && t.fees != null) ? t.pnl - t.fees : t.pnl;
+        const pc = pnlNet != null ? (pnlNet >= 0 ? 'pos' : 'neg') : '';
+        const dateStr = (t.trade_date || '').substring(5);  // MM-DD
+        const strikes = (t.put_strike != null ? t.put_strike : '—') + '/' + (t.call_strike != null ? t.call_strike : '—');
+        return '<tr>' +
+          '<td>' + dateStr + '</td>' +
+          '<td class="tr">' + strikes + '</td>' +
+          '<td class="tr">' + (t.wing_width != null ? t.wing_width : '—') + '</td>' +
+          '<td class="tr tcredit">$' + Number(t.net_credit || 0).toFixed(2) + '</td>' +
+          '<td>' + bdg(t.put_status)  + '</td>' +
+          '<td class="tr" style="color:#6b7280">$' + Number(t.put_credit || 0).toFixed(2)  + '</td>' +
+          '<td>' + bdg(t.call_status) + '</td>' +
+          '<td class="tr" style="color:#6b7280">$' + Number(t.call_credit || 0).toFixed(2) + '</td>' +
+          '<td class="tr ' + pc + '">' + (pnlNet != null ? fMoney(pnlNet) : '—') + '</td>' +
+          '<td style="color:#6b7280;font-size:10px">' + (t.session_quality || '—') + '</td>' +
+          '</tr>';
+      }).join('');
 }
 
 // ── render all ────────────────────────────────────────────────────────────────
@@ -1616,8 +1776,22 @@ async function fetchGex() {
   badge.textContent = 'Loading…';
   try {
     const r = await fetch('/api/gex?symbol=' + encodeURIComponent(sym));
-    if (!r.ok) return;
+    if (!r.ok) {
+      badge.textContent = 'HTTP ' + r.status;
+      badge.style.color = '#e8423a';
+      return;
+    }
     const d = await r.json();
+    if (!d.ok) {
+      // The server always answers with HTTP 200 even on internal failure
+      // (e.g. no chain data cached yet for this symbol) — d.ok is the real
+      // success signal. Without this check the badge was left stuck on
+      // "Loading…" and renderGex(d) would run against a response with no
+      // `series`, rendering blank/broken charts with no visible error.
+      badge.textContent = 'error: ' + (d.error || 'unknown');
+      badge.style.color = '#e8423a';
+      return;
+    }
     if (d.source === 'rest') {
       badge.textContent = '⚡ live REST fetch';
       badge.style.color = '#f5a623';

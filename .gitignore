@@ -16,6 +16,7 @@ data/streamer.pid
 # Agent logs and EOD reports
 logs/*.log
 logs/eod-*.md
+logs/streamer.*
 
 # Python bytecode
 __pycache__/

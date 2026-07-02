@@ -27,8 +27,7 @@ else:
     target = next_trading_day(today)
     reason = 'next trading day (market closed or after 16:00 ET)'
 dte = (target - today).days
-cands = cfg['wing_width_candidates']
-test_width = sorted(cands)[len(cands) // 2]
+test_width = max(1, cfg['max_wing_width'] // 2)
 print(json.dumps({'now_et': now.strftime('%H:%M %Z'), 'target_date': str(target), 'dte': dte, 'reason': reason, 'symbol': cfg['symbol'], 'delta_target': cfg['delta_target'], 'test_wing_width': test_width}))
 "
 ```

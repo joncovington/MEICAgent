@@ -10,13 +10,13 @@ Each IC consists of four legs:
 - **Short put** + **long put** (put spread) — below the market
 - **Short call** + **long call** (call spread) — above the market
 
-Short strikes begin from `delta_target` (default 0.15) as a starting suggestion. The agent then applies OTM distance guardrails (see below) and may move strikes farther OTM if the guardrail requires it. Wing width is selected dynamically per entry from `wing_width_candidates`.
+Short strikes begin from `delta_target` (default 0.18) as a starting suggestion. The agent then applies OTM distance guardrails (see below) and may move strikes farther OTM if the guardrail requires it. Wing width is decided dynamically per entry, bounded by `max_wing_width` rather than picked from a fixed list.
 
 ---
 
 ## Wing width selection
 
-The agent evaluates all widths in `wing_width_candidates` on each entry and picks the one that best fits current conditions:
+The agent isn't restricted to a fixed enumerated list — it decides the wing width per entry, choosing any reasonable value up to `max_wing_width`, and picks the one that best fits current conditions:
 
 - **Earlier in the session** — favor wider wings (more credit, more room)
 - **Later in the session** or multiple ICs already open — favor narrower wings (lower max loss as gamma accelerates)

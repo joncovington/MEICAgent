@@ -69,10 +69,11 @@ logger = logging.getLogger(__name__)
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS stream_chain (
-    streamer_symbol  TEXT PRIMARY KEY,
-    expiration       TEXT NOT NULL,
-    data_json        TEXT NOT NULL,
-    updated_at       REAL NOT NULL
+    streamer_symbol   TEXT PRIMARY KEY,
+    expiration        TEXT NOT NULL,
+    underlying_symbol TEXT,
+    data_json         TEXT NOT NULL,
+    updated_at        REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chain_expiration ON stream_chain(expiration);
 CREATE TABLE IF NOT EXISTS stream_quotes (
@@ -163,6 +164,10 @@ def _cache_connect() -> sqlite3.Connection:
         s = stmt.strip()
         if s:
             conn.execute(s)
+    existing_chain_cols = {row[1] for row in conn.execute("PRAGMA table_info(stream_chain)")}
+    if "underlying_symbol" not in existing_chain_cols:
+        conn.execute("ALTER TABLE stream_chain ADD COLUMN underlying_symbol TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chain_underlying ON stream_chain(underlying_symbol, expiration)")
     conn.commit()
     return conn
 
@@ -290,6 +295,27 @@ class _State:
         self.gex_syms: list[str] = []                 # current GEX streamer symbols
         self.gex_chain: dict | None = None            # REST chain for GEX underlying
         self.gex_target_symbol: str | None = None     # desired GEX symbol (set via HTTP API)
+        # Batched-commit bookkeeping: DXLink pushes Trade/Quote/Greeks/Summary
+        # events far more often than any reader's freshness gate requires
+        # (10s-2700s — see tt.py), so committing on every single event turns
+        # market data ingestion into a synchronous disk-sync storm. Batch
+        # commits instead; _COMMIT_BATCH_INTERVAL_S bounds the extra staleness.
+        self.pending_writes = 0
+        self.last_commit_at = 0.0
+
+
+_COMMIT_BATCH_INTERVAL_S = 0.5
+_COMMIT_BATCH_MAX_PENDING = 25
+
+
+def _maybe_commit(state: "_State") -> None:
+    """Commit state.conn if enough writes or time have accumulated since the last commit."""
+    state.pending_writes += 1
+    now = time.time()
+    if state.pending_writes >= _COMMIT_BATCH_MAX_PENDING or (now - state.last_commit_at) >= _COMMIT_BATCH_INTERVAL_S:
+        state.conn.commit()
+        state.pending_writes = 0
+        state.last_commit_at = now
 
 
 async def _run_stream(state: _State, underlying: str, gex_symbol: str | None = None) -> None:
@@ -363,7 +389,7 @@ async def _listen_trade(streamer, state: _State, Trade) -> None:
                 (event.event_symbol, _f(event.price), _f(event.change),
                  _f(event.day_volume), ts),
             )
-            conn.commit()
+            _maybe_commit(state)
             state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
         except Exception as exc:
             logger.warning("Trade write error: %s", exc)
@@ -389,7 +415,7 @@ async def _listen_quote(streamer, state: _State, Quote) -> None:
                 (event.event_symbol, bid, ask, mid,
                  _f(event.bid_size), _f(event.ask_size), ts),
             )
-            conn.commit()
+            _maybe_commit(state)
             state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
         except Exception as exc:
             logger.warning("Quote write error: %s", exc)
@@ -414,7 +440,7 @@ async def _listen_greeks(streamer, state: _State, Greeks) -> None:
                  _f(event.theta), _f(event.vega), _f(event.rho),
                  _f(event.volatility), _f(event.price), ts),
             )
-            conn.commit()
+            _maybe_commit(state)
             state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
         except Exception as exc:
             logger.warning("Greeks write error: %s", exc)
@@ -437,7 +463,7 @@ async def _listen_summary(streamer, state: _State, Summary) -> None:
                 "open_interest=excluded.open_interest, updated_at=excluded.updated_at",
                 (event.event_symbol, int(oi), ts),
             )
-            conn.commit()
+            _maybe_commit(state)
             state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
         except Exception as exc:
             logger.warning("Summary write error: %s", exc)
@@ -481,18 +507,24 @@ async def _fetch_dte0_chain(underlying: str) -> dict:
 
 
 def _write_chain_to_cache(conn: sqlite3.Connection, option_map: dict) -> None:
-    """Persist the option chain structure to stream_cache.db."""
+    """Persist the option chain structure to stream_cache.db.
+
+    Tags each row with its underlying_symbol (from the option's own data) so
+    that lookups can filter by underlying — XSP and SPX chains share the same
+    0DTE expiration date, so an expiration-only filter would mix the two.
+    """
     import json as _json
     now = time.time()
     rows = []
     for sym, o in option_map.items():
         dump = getattr(o, "model_dump", None)
         data = dump(mode="json") if callable(dump) else {"streamer_symbol": sym}
-        rows.append((sym, str(data.get("expiration_date", "")), _json.dumps(data), now))
+        rows.append((sym, str(data.get("expiration_date", "")), data.get("underlying_symbol"), _json.dumps(data), now))
     conn.executemany(
-        "INSERT INTO stream_chain (streamer_symbol, expiration, data_json, updated_at) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT(streamer_symbol) DO UPDATE SET "
-        "expiration=excluded.expiration, data_json=excluded.data_json, updated_at=excluded.updated_at",
+        "INSERT INTO stream_chain (streamer_symbol, expiration, underlying_symbol, data_json, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(streamer_symbol) DO UPDATE SET "
+        "expiration=excluded.expiration, underlying_symbol=excluded.underlying_symbol, "
+        "data_json=excluded.data_json, updated_at=excluded.updated_at",
         rows,
     )
     conn.commit()
@@ -706,7 +738,7 @@ _REST_POLL_KEYS = [
     ("account_info",    "get_account_info",    {"account_number": None}),
     ("positions",       "get_positions",       {"account_number": None}),
     ("working_orders",  "get_working_orders",  {"account_number": None}),
-    ("market_overview", "get_market_overview", {"quotes_timeout": 4.0}),
+    ("market_overview", "get_market_overview", {"symbols": ["XSP", "SPX", "VIX"], "quotes_timeout": 4.0}),
 ]
 _REST_POLL_INTERVAL = 15.0
 
@@ -824,9 +856,23 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
             finally:
                 conn.close()
             if cached is not None:
-                cached["source"] = "rest_cache"
-                return cached
-            # Cache cold (first poll not yet complete) — fall through to REST loop
+                if command == "get_market_overview" and cached.get("ok") and "metrics" in cached:
+                    requested = {s.upper() for s in args.get("symbols", [])}
+                    if requested:
+                        filtered = [m for m in cached["metrics"] if (m or {}).get("symbol", "").upper() in requested]
+                        if len(filtered) == len(requested):
+                            result = dict(cached)
+                            result["metrics"] = filtered
+                            result["source"] = "rest_cache"
+                            return result
+                        # one or more requested symbols aren't cached yet — fall through to a live call
+                    else:
+                        cached["source"] = "rest_cache"
+                        return cached
+                else:
+                    cached["source"] = "rest_cache"
+                    return cached
+            # Cache cold (first poll not yet complete), or requested symbols not covered — fall through to REST loop
 
         # ── Tier 3: live REST calls via dedicated REST loop ──────────────────
         global _rest_loop
@@ -902,16 +948,17 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
             # Resolve expiration from cache when not supplied
             if not expiration:
                 row = conn.execute(
-                    "SELECT expiration FROM stream_chain "
-                    "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1"
+                    "SELECT expiration FROM stream_chain WHERE underlying_symbol = ? "
+                    "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1",
+                    (sym,),
                 ).fetchone()
                 if not row:
                     return None
                 expiration = row["expiration"]
 
             chain_rows = conn.execute(
-                "SELECT data_json, updated_at FROM stream_chain WHERE expiration = ?",
-                (expiration,),
+                "SELECT data_json, updated_at FROM stream_chain WHERE expiration = ? AND underlying_symbol = ?",
+                (expiration, sym),
             ).fetchall()
             if not chain_rows or (now - min(r["updated_at"] for r in chain_rows)) > 4 * 3600:
                 return None
@@ -948,7 +995,8 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
                     f"SELECT symbol, delta, gamma, theta, iv, updated_at FROM stream_greeks WHERE symbol IN ({ph})",
                     syms,
                 ).fetchall():
-                    if (now - row["updated_at"]) < 10:
+                    # Greeks publish far less often than Quotes/Trades on DXLink.
+                    if (now - row["updated_at"]) < 2700:
                         greeks_map[row["symbol"]] = dict(row)
                 if len(greeks_map) < len(syms):
                     return None
@@ -986,16 +1034,17 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
         try:
             # Nearest expiration from cache
             row = conn.execute(
-                "SELECT expiration FROM stream_chain "
-                "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1"
+                "SELECT expiration FROM stream_chain WHERE underlying_symbol = ? "
+                "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1",
+                (sym,),
             ).fetchone()
             if not row:
                 return None
             expiration = row["expiration"]
 
             chain_rows = conn.execute(
-                "SELECT data_json FROM stream_chain WHERE expiration = ?",
-                (expiration,),
+                "SELECT data_json FROM stream_chain WHERE expiration = ? AND underlying_symbol = ?",
+                (expiration, sym),
             ).fetchall()
             if not chain_rows:
                 return None
@@ -1016,7 +1065,9 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
                 f"SELECT symbol, delta, updated_at FROM stream_greeks WHERE symbol IN ({ph})",
                 all_syms,
             ).fetchall():
-                if (now - r["updated_at"]) < 10:
+                # Greeks update far less often than Quotes/Trades on DXLink — a 10s
+                # window would treat every strike as stale and force a non-delta fallback.
+                if (now - r["updated_at"]) < 2700:
                     greeks_map[r["symbol"]] = r["delta"]
 
             def closest_delta(opts, target):
@@ -1030,14 +1081,33 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
                         best_diff, best = diff, o
                 return best
 
+            def nearest_by_strike(opts, target_strike, exclude_idx=None):
+                # wing_width is a point/dollar distance, not a strike-count offset — strike
+                # spacing varies by symbol (e.g. $1 near-the-money on XSP vs $5 on SPX), so
+                # walking N array slots would silently produce the wrong-width spread.
+                best, best_diff = None, float("inf")
+                for i, o in enumerate(opts):
+                    if i == exclude_idx:
+                        continue
+                    try:
+                        s = float(o.get("strike_price", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    diff = abs(s - target_strike)
+                    if diff < best_diff:
+                        best_diff, best = diff, o
+                return best
+
             sc = closest_delta(calls, short_delta)
             sp = closest_delta(puts, -short_delta)
             if sc is None or sp is None:
                 return None  # no greeks — fall back to async
             sc_idx = calls.index(sc)
             sp_idx = puts.index(sp)
-            lc = calls[min(len(calls)-1, sc_idx + wing_width)]
-            lp = puts[max(0, sp_idx - wing_width)]
+            sc_strike = float(sc.get("strike_price", 0))
+            sp_strike = float(sp.get("strike_price", 0))
+            lc = nearest_by_strike(calls, sc_strike + wing_width, exclude_idx=sc_idx) or calls[-1]
+            lp = nearest_by_strike(puts, sp_strike - wing_width, exclude_idx=sp_idx) or puts[0]
 
             # Quotes for credit estimate
             leg_syms = [l.get("streamer_symbol") for l in (sp, lp, sc, lc) if l.get("streamer_symbol")]
@@ -1216,6 +1286,14 @@ def _cmd_status() -> None:
             x["last"] for x in (qtrades, qquotes, qgreeks) if x["last"] is not None
         ) if any(x["last"] for x in (qtrades, qquotes, qgreeks)) else None
         info["oldest_event_age_s"] = round(now - oldest, 1) if oldest else None
+
+        # Stale-cache guardrail: flags a silently-dead persistent connection
+        # (running=true but no fresh events) — see stall incident 2026-07-01.
+        # oldest_event_age_s (numeric, computed above from stream_* updated_at
+        # columns) is used rather than the TEXT last_event_at column.
+        stale = pid is not None and (info["oldest_event_age_s"] is None or info["oldest_event_age_s"] > 600)
+        info["stale_warning"] = stale
+        info["stale_age_s"] = info["oldest_event_age_s"]
         print(json.dumps(info, default=str))
     else:
         conn.close()

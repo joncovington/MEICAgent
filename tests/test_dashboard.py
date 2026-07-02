@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     pnl REAL, fees REAL, fill_confirmed_at TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ic_spread_legs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ic_order_id TEXT NOT NULL REFERENCES ic_trades(ic_order_id),
+    side TEXT NOT NULL CHECK (side IN ('put', 'call')),
+    status TEXT NOT NULL DEFAULT 'open',
+    exit_time TEXT, exit_reason TEXT, exit_price REAL, pnl REAL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(ic_order_id, side)
+);
 CREATE TABLE IF NOT EXISTS daily_summary (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     summary_date TEXT UNIQUE NOT NULL, symbol TEXT,
@@ -103,6 +112,20 @@ def _insert_trade(conn, **kwargs):
     conn.commit()
 
 
+def _insert_leg(conn, **kwargs):
+    defaults = dict(
+        ic_order_id="IC-001", side="put", status="open",
+        exit_time=None, exit_reason=None, exit_price=None, pnl=None,
+        created_at=_NOW, updated_at=_NOW,
+    )
+    defaults.update(kwargs)
+    cols = ", ".join(defaults)
+    placeholders = ", ".join("?" * len(defaults))
+    conn.execute(f"INSERT INTO ic_spread_legs ({cols}) VALUES ({placeholders})",
+                 list(defaults.values()))
+    conn.commit()
+
+
 def _insert_summary(conn, **kwargs):
     defaults = dict(
         summary_date=_YESTERDAY, symbol="SPX",
@@ -120,12 +143,17 @@ def _insert_summary(conn, **kwargs):
 
 @pytest.fixture
 def db_path(monkeypatch, tmp_path):
-    """Temp DB with schema; monkeypatches dashboard._DB_PATH and _today."""
+    """Temp DB with schema; monkeypatches dashboard._DB_PATH and the date helpers
+    so stats windows are anchored to _TODAY regardless of the real wall-clock date
+    the tests happen to run on."""
     path = str(tmp_path / "meic_trades.db")
     conn = _make_db(path)
     conn.close()
     monkeypatch.setattr(dashboard, "_DB_PATH", path)
     monkeypatch.setattr(dashboard, "_today", lambda: _TODAY)
+    monkeypatch.setattr(dashboard, "_week_start", lambda: "2026-06-15")
+    monkeypatch.setattr(dashboard, "_month_start", lambda: "2026-06-01")
+    monkeypatch.setattr(dashboard, "_year_start", lambda: "2026-01-01")
     return path
 
 
@@ -193,117 +221,84 @@ def test_status_stopped_no_exit_analysis():
     assert call_s["type"] == "stopped"
 
 def test_status_stopped_put_side():
-    ea = json.dumps({"stopped_spread": "put"})
+    put_leg = {"status": "stopped", "exit_time": "2026-06-20T11:21:00", "pnl": -0.5}
+    call_leg = {"status": "open", "exit_time": None, "pnl": None}
     put_s, call_s = dashboard._spread_statuses(
-        _trade(status="partial", exit_time="2026-06-20T11:21:00", exit_analysis=ea)
+        _trade(status="partial"), put_leg, call_leg
     )
     assert put_s["type"] == "stopped"
     assert call_s["type"] == "monitoring"
 
 def test_status_stopped_call_side():
-    ea = json.dumps({"stopped_spread": "call"})
+    put_leg = {"status": "open", "exit_time": None, "pnl": None}
+    call_leg = {"status": "stopped", "exit_time": "2026-06-20T14:05:00", "pnl": -0.5}
     put_s, call_s = dashboard._spread_statuses(
-        _trade(status="partial", exit_time="2026-06-20T14:05:00", exit_analysis=ea)
+        _trade(status="partial"), put_leg, call_leg
     )
     assert put_s["type"] == "monitoring"
     assert call_s["type"] == "stopped"
 
 def test_status_stopped_time_in_label():
-    ea = json.dumps({"stopped_spread": "put"})
-    put_s, _ = dashboard._spread_statuses(
-        _trade(status="partial", exit_time="2026-06-20T11:21:00", exit_analysis=ea)
-    )
+    put_leg = {"status": "stopped", "exit_time": "2026-06-20T11:21:00", "pnl": -0.5}
+    call_leg = {"status": "open", "exit_time": None, "pnl": None}
+    put_s, _ = dashboard._spread_statuses(_trade(status="partial"), put_leg, call_leg)
     assert "11:21" in put_s["label"]
 
-def test_status_stopped_invalid_exit_analysis():
-    put_s, call_s = dashboard._spread_statuses(
-        _trade(status="stopped", exit_time="2026-06-20T10:00:00",
-               exit_analysis="not valid json{{{")
-    )
-    assert put_s["type"] == "stopped"
-    assert call_s["type"] == "stopped"
 
+# ── _stats_for_period ────────────────────────────────────────────────────────
+# Replaces the old _today_stats/_historical_stats/_merge trio: dashboard.py now
+# computes stats for any date range (today, week, ..., all_time) directly from
+# ic_trades + ic_spread_legs in one function, rather than pre-aggregating into
+# daily_summary and merging today's live numbers on top.
 
-# ── _today_stats ──────────────────────────────────────────────────────────────
-
-def test_today_stats_empty(db_path):
+def test_stats_for_period_empty(db_path):
     conn = dashboard._connect()
-    result = dashboard._today_stats(conn, _TODAY)
+    result = dashboard._stats_for_period(conn, start=_TODAY, end=_TODAY)
     conn.close()
     assert result["net_pnl"] == 0.0
     assert result["total_trades"] == 0
     assert result["wl_ratio"] is None
 
-def test_today_stats_with_trades(db_path):
+def test_stats_for_period_with_trades(db_path):
     conn = dashboard._connect()
     _insert_trade(conn, ic_order_id="IC-001", pnl=1.20, status="expired")
     _insert_trade(conn, ic_order_id="IC-002", pnl=-0.80, status="stopped")
     _insert_trade(conn, ic_order_id="IC-003", pnl=None,  status="cancelled")
-    result = dashboard._today_stats(conn, _TODAY)
+    result = dashboard._stats_for_period(conn, start=_TODAY, end=_TODAY)
     conn.close()
     assert result["total_trades"] == 2       # cancelled excluded
-    assert result["wins"] == 1
-    assert result["losses"] == 1
+    # No ic_spread_legs rows for either trade, so each side of the IC is scored
+    # from the whole-trade status: expired -> both sides win, stopped -> both lose.
+    assert result["wins"] == 2
+    assert result["losses"] == 2
     assert result["wl_ratio"] == 50.0
     assert abs(result["net_pnl"] - 0.40) < 0.01
 
-def test_today_stats_excludes_pending(db_path):
+def test_stats_for_period_excludes_pending(db_path):
     conn = dashboard._connect()
     _insert_trade(conn, ic_order_id="IC-001", pnl=None, status="pending")
-    result = dashboard._today_stats(conn, _TODAY)
+    result = dashboard._stats_for_period(conn, start=_TODAY, end=_TODAY)
     conn.close()
     assert result["total_trades"] == 0
 
-
-# ── _historical_stats ─────────────────────────────────────────────────────────
-
-def test_historical_stats_empty(db_path):
+def test_stats_for_period_excludes_out_of_range(db_path):
     conn = dashboard._connect()
-    result = dashboard._historical_stats(conn, "2026-06-01", _TODAY)
-    conn.close()
-    assert result["net_pnl"] == 0.0
-    assert result["total_trades"] == 0
-
-def test_historical_stats_sums_daily_summary(db_path):
-    conn = dashboard._connect()
-    _insert_summary(conn, summary_date="2026-06-18", entries_filled=2, win_count=2, net_pnl=1.50)
-    _insert_summary(conn, summary_date="2026-06-19", entries_filled=3, win_count=1, net_pnl=0.80)
-    result = dashboard._historical_stats(conn, "2026-06-01", _TODAY)
-    conn.close()
-    assert result["total_trades"] == 5
-    assert result["wins"] == 3
-    assert abs(result["net_pnl"] - 2.30) < 0.01
-
-def test_historical_stats_excludes_today(db_path):
-    conn = dashboard._connect()
-    _insert_summary(conn, summary_date=_TODAY, entries_filled=2, win_count=2, net_pnl=5.00)
-    result = dashboard._historical_stats(conn, "2026-06-01", _TODAY)
+    _insert_trade(conn, ic_order_id="IC-001", trade_date=_YESTERDAY, pnl=5.00, status="expired")
+    result = dashboard._stats_for_period(conn, start=_TODAY, end=_TODAY)
     conn.close()
     assert result["total_trades"] == 0
 
-
-# ── _merge ────────────────────────────────────────────────────────────────────
-
-def test_merge_combines_pnl():
-    hist = {"net_pnl": 10.0, "total_trades": 5, "wins": 4, "losses": 1}
-    today = {"net_pnl": 1.5,  "total_trades": 2, "wins": 1, "losses": 1, "wl_ratio": 50.0}
-    result = dashboard._merge(hist, today)
-    assert abs(result["net_pnl"] - 11.5) < 0.01
-    assert result["total_trades"] == 7
-    assert result["wins"] == 5
-    assert result["losses"] == 2
-
-def test_merge_wl_ratio_recalculated():
-    hist  = {"net_pnl": 0, "total_trades": 3, "wins": 3, "losses": 0}
-    today = {"net_pnl": 0, "total_trades": 1, "wins": 0, "losses": 1, "wl_ratio": 0.0}
-    result = dashboard._merge(hist, today)
-    assert result["wl_ratio"] == 75.0
-
-def test_merge_no_trades_wl_ratio_none():
-    hist  = {"net_pnl": 0, "total_trades": 0, "wins": 0, "losses": 0}
-    today = {"net_pnl": 0, "total_trades": 0, "wins": 0, "losses": 0, "wl_ratio": None}
-    result = dashboard._merge(hist, today)
-    assert result["wl_ratio"] is None
+def test_stats_for_period_uses_leg_rows_when_present(db_path):
+    """A per-side stop should count as a win on one side and a loss on the other,
+    not a whole-trade win/loss guess, once ic_spread_legs rows exist."""
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-001", status="partial", pnl=0.30)
+    _insert_leg(conn, ic_order_id="IC-001", side="put", status="stopped", pnl=-0.50)
+    _insert_leg(conn, ic_order_id="IC-001", side="call", status="expired", pnl=0.80)
+    result = dashboard._stats_for_period(conn, start=_TODAY, end=_TODAY)
+    conn.close()
+    assert result["wins"] == 1
+    assert result["losses"] == 1
 
 
 # ── _build_api_data ───────────────────────────────────────────────────────────
@@ -385,14 +380,16 @@ def test_build_api_data_fee_drag_none_when_no_trades(db_path):
     assert result["analytics"]["fee_summary"]["fee_drag_pct"] is None
 
 def test_build_api_data_today_merges_into_week(db_path):
+    """Stats are computed directly from ic_trades over the period's date range, so a
+    trade from earlier in the week and today's trade should both land in 'week'."""
     conn = dashboard._connect()
-    _insert_trade(conn, ic_order_id="IC-001", pnl=2.00, status="expired")
-    _insert_summary(conn, summary_date="2026-06-17", entries_filled=1,
-                    win_count=1, net_pnl=1.00)
+    _insert_trade(conn, ic_order_id="IC-001", trade_date=_TODAY, pnl=2.00, status="expired")
+    _insert_trade(conn, ic_order_id="IC-002", trade_date="2026-06-17", pnl=1.00, status="expired")
     conn.close()
     result = dashboard._build_api_data()
-    # week should include both yesterday's summary and today's live trade
-    assert result["stats"]["week"]["net_pnl"] >= 2.00
-    assert result["stats"]["week"]["total_trades"] >= 1
+    assert abs(result["stats"]["week"]["net_pnl"] - 3.00) < 0.01
+    assert result["stats"]["week"]["total_trades"] == 2
+    assert abs(result["stats"]["today"]["net_pnl"] - 2.00) < 0.01
+    assert result["stats"]["today"]["total_trades"] == 1
 
 

@@ -94,6 +94,22 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     created_at                TEXT NOT NULL,
     updated_at                TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_ic_trades_date_status ON ic_trades(trade_date, status);
+CREATE INDEX IF NOT EXISTS idx_ic_trades_symbol_status ON ic_trades(symbol, status);
+
+CREATE TABLE IF NOT EXISTS ic_spread_legs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ic_order_id       TEXT NOT NULL REFERENCES ic_trades(ic_order_id),
+    side              TEXT NOT NULL CHECK (side IN ('put', 'call')),
+    status            TEXT NOT NULL DEFAULT 'open',
+    exit_time         TEXT,
+    exit_reason       TEXT,
+    exit_price        REAL,
+    pnl               REAL,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    UNIQUE(ic_order_id, side)
+);
 
 CREATE TABLE IF NOT EXISTS daily_summary (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,6 +278,42 @@ def cmd_get_eod_summary(_args):
     })
 
 
+def cmd_get_fee_estimate(args):
+    """Estimate $/contract fee drag for a symbol from recent closed trades.
+
+    Used by the fee-adjusted credit floor (Step 6): a fixed pct-of-width
+    credit floor can pass a trade whose entire credit gets consumed by fees
+    on symbols/wing-widths with high fee-to-premium ratios (e.g. XSP 2026-06-30:
+    $4.00 gross credit, $4.96 fees, net -$0.97). Sample size is reported so
+    the caller can fall back to a config default when data is thin.
+    """
+    symbol = (args.symbol or "").upper()
+    lookback = args.lookback or 20
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT fees, quantity FROM ic_trades "
+        "WHERE symbol = ? AND status NOT IN ('pending', 'cancelled', 'partial_entry') "
+        "AND fees IS NOT NULL AND quantity IS NOT NULL AND quantity > 0 "
+        "ORDER BY id DESC LIMIT ?",
+        (symbol, lookback),
+    ).fetchall()
+    conn.close()
+
+    sample_size = len(rows)
+    total_fees = sum((r["fees"] or 0) for r in rows)
+    total_contracts = sum((r["quantity"] or 0) for r in rows)
+    avg_fee_per_contract = round(total_fees / total_contracts, 2) if total_contracts else None
+
+    _out({
+        "ok": True,
+        "symbol": symbol,
+        "sample_size": sample_size,
+        "avg_fee_per_contract": avg_fee_per_contract,
+        "total_fees": round(total_fees, 2),
+        "total_contracts": total_contracts,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Write commands
 # ---------------------------------------------------------------------------
@@ -317,37 +369,85 @@ def cmd_update_trade(args):
 
 
 def cmd_record_stop_adjustment(args):
+    """Read-modify-write on stop_adjustment_history/count for one ic_order_id.
+
+    Wrapped in BEGIN IMMEDIATE so the SELECT and UPDATE are atomic against a
+    concurrent call for the same trade — without this, two overlapping calls
+    could both read the same history, and the second write would silently
+    drop the first adjustment.
+    """
+    now = str(_now_et())
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT stop_adjustment_history, stop_adjustment_count FROM ic_trades WHERE ic_order_id = ?",
+            (args.ic_order_id,)
+        ).fetchone()
+        if not row:
+            conn.execute("ROLLBACK")
+            _out({"ok": False, "error": f"Trade {args.ic_order_id} not found"})
+            return
+        history = json.loads(row["stop_adjustment_history"] or "[]")
+        history.append({
+            "time": now,
+            "new_trigger": args.new_trigger,
+            "new_limit": args.new_limit,
+            "reason": args.reason,
+        })
+        new_count = (row["stop_adjustment_count"] or 0) + 1
+        conn.execute(
+            """UPDATE ic_trades
+               SET stop_trigger_current = ?,
+                   stop_limit_current = ?,
+                   stop_adjustment_count = ?,
+                   stop_adjustment_history = ?,
+                   updated_at = ?
+               WHERE ic_order_id = ?""",
+            (args.new_trigger, args.new_limit, new_count, json.dumps(history), now, args.ic_order_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _out({"ok": True, "stop_adjustment_count": new_count})
+
+
+def cmd_record_leg_exit(args):
     now = str(_now_et())
     conn = _connect()
     row = conn.execute(
-        "SELECT stop_adjustment_history, stop_adjustment_count FROM ic_trades WHERE ic_order_id = ?",
-        (args.ic_order_id,)
+        "SELECT id FROM ic_trades WHERE ic_order_id = ?", (args.ic_order_id,)
     ).fetchone()
     if not row:
         conn.close()
         _out({"ok": False, "error": f"Trade {args.ic_order_id} not found"})
         return
-    history = json.loads(row["stop_adjustment_history"] or "[]")
-    history.append({
-        "time": now,
-        "new_trigger": args.new_trigger,
-        "new_limit": args.new_limit,
-        "reason": args.reason,
-    })
-    new_count = (row["stop_adjustment_count"] or 0) + 1
     conn.execute(
-        """UPDATE ic_trades
-           SET stop_trigger_current = ?,
-               stop_limit_current = ?,
-               stop_adjustment_count = ?,
-               stop_adjustment_history = ?,
-               updated_at = ?
-           WHERE ic_order_id = ?""",
-        (args.new_trigger, args.new_limit, new_count, json.dumps(history), now, args.ic_order_id)
+        """INSERT INTO ic_spread_legs
+               (ic_order_id, side, status, exit_time, exit_reason, exit_price, pnl, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(ic_order_id, side) DO UPDATE SET
+               status = excluded.status,
+               exit_time = excluded.exit_time,
+               exit_reason = excluded.exit_reason,
+               exit_price = excluded.exit_price,
+               pnl = excluded.pnl,
+               updated_at = excluded.updated_at""",
+        (args.ic_order_id, args.side, args.status, args.exit_time,
+         args.exit_reason, args.exit_price, args.pnl, now, now)
     )
     conn.commit()
     conn.close()
-    _out({"ok": True, "stop_adjustment_count": new_count})
+    _out({"ok": True})
+
+
+def cmd_get_spread_legs(args):
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM ic_spread_legs WHERE ic_order_id = ?", (args.ic_order_id,)
+    ).fetchall()
+    conn.close()
+    _out({"ok": True, "legs": [dict(r) for r in rows]})
 
 
 def cmd_log_loop_action(args):
@@ -465,6 +565,10 @@ def main():
     sub.add_parser("get_session_init")
     sub.add_parser("set_session_init")
 
+    p_fee = sub.add_parser("get_fee_estimate")
+    p_fee.add_argument("--symbol", required=True)
+    p_fee.add_argument("--lookback", default=20, type=int)
+
     p_save = sub.add_parser("save_trade")
     p_save.add_argument("--data", required=True)
 
@@ -482,6 +586,18 @@ def main():
     p_adj.add_argument("--new_trigger", required=True, type=float)
     p_adj.add_argument("--new_limit", required=True, type=float)
     p_adj.add_argument("--reason", required=True)
+
+    p_leg = sub.add_parser("record_leg_exit")
+    p_leg.add_argument("--ic_order_id", required=True)
+    p_leg.add_argument("--side", required=True, choices=["put", "call"])
+    p_leg.add_argument("--status", required=True)
+    p_leg.add_argument("--exit_time", default=None)
+    p_leg.add_argument("--exit_reason", default=None)
+    p_leg.add_argument("--exit_price", default=None, type=float)
+    p_leg.add_argument("--pnl", default=None, type=float)
+
+    p_getlegs = sub.add_parser("get_spread_legs")
+    p_getlegs.add_argument("--ic_order_id", required=True)
 
     p_dsum = sub.add_parser("save_daily_summary")
     p_dsum.add_argument("--date", default=None)
@@ -509,11 +625,14 @@ def main():
         "get_eod_summary": cmd_get_eod_summary,
         "get_session_init": cmd_get_session_init,
         "set_session_init": cmd_set_session_init,
+        "get_fee_estimate": cmd_get_fee_estimate,
         "save_trade": cmd_save_trade,
         "update_trade": cmd_update_trade,
         "save_daily_summary": cmd_save_daily_summary,
         "record_stop_adjustment": cmd_record_stop_adjustment,
         "log_loop_action": cmd_log_loop_action,
+        "record_leg_exit": cmd_record_leg_exit,
+        "get_spread_legs": cmd_get_spread_legs,
     }
 
     fn = dispatch.get(args.command)

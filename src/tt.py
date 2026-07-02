@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -38,6 +39,21 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import credentials as _creds
 from session import get_session
+
+# ---------------------------------------------------------------------------
+# Logging — each invocation is a short-lived subprocess whose only normal
+# output channel is the JSON printed to stdout, so a failed streamer-HTTP
+# fallback (see _try_streamer_http) would otherwise be invisible across
+# iterations. Append warnings to a file so degraded-mode calls are auditable.
+# ---------------------------------------------------------------------------
+_LOG_FILE = Path(__file__).parent.parent / "logs" / "tt.log"
+_LOG_FILE.parent.mkdir(exist_ok=True)
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logger.setLevel(logging.WARNING)
+    _fh = logging.FileHandler(_LOG_FILE)
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(_fh)
 
 
 # ---------------------------------------------------------------------------
@@ -56,8 +72,20 @@ def _load_config() -> dict:
 _STREAMER_PORT = 7699
 
 
+_last_streamer_http_error: str | None = None
+
+
 def _try_streamer_http(command: str, args_dict: dict) -> dict | None:
-    """POST command to the streamer HTTP API. Returns parsed JSON or None on failure."""
+    """POST command to the streamer HTTP API. Returns parsed JSON or None on failure.
+
+    Sets module-level `_last_streamer_http_error` so callers falling back to the
+    slow (cold-import asyncio) path can surface *why* in the response JSON —
+    a caller-invisible fallback here previously masked a 34+ hour streamer
+    stall (silently-dead persistent connection) behind an unremarkable
+    per-call latency bump.
+    """
+    global _last_streamer_http_error
+    import socket
     import urllib.request
     import urllib.error
     body = json.dumps({"command": command, "args": args_dict}).encode()
@@ -69,8 +97,22 @@ def _try_streamer_http(command: str, args_dict: dict) -> dict | None:
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read())
-    except Exception:
+            result = json.loads(resp.read())
+        _last_streamer_http_error = None
+        return result
+    except (ConnectionRefusedError, urllib.error.URLError) as exc:
+        # Streamer daemon simply isn't running — normal/expected, not worth a warning.
+        _last_streamer_http_error = f"streamer not reachable: {exc}"
+        return None
+    except (socket.timeout, TimeoutError) as exc:
+        # Daemon is running but didn't respond within 5s — the interesting case:
+        # the same failure shape as the 2026-07-01 session/event-loop stall.
+        _last_streamer_http_error = f"streamer HTTP timeout: {exc}"
+        logger.warning("streamer HTTP timeout on command=%s: %s", command, exc)
+        return None
+    except Exception as exc:
+        _last_streamer_http_error = f"streamer HTTP error: {exc}"
+        logger.warning("streamer HTTP error on command=%s: %s", command, exc)
         return None
 
 
@@ -87,6 +129,14 @@ def _live_trading_enabled() -> bool:
 
 _CACHE_DB = Path(__file__).parent.parent / "data" / "stream_cache.db"
 _CACHE_MAX_AGE = 10.0  # seconds; older data falls back to live DXLink call
+# Greeks update far less often than Quotes/Trades on the DXLink feed (server recalculates
+# on a slower cadence, not tick-by-tick) — a 10s window means every strike is "stale" by
+# the time a request arrives, forcing a crude non-delta fallback for strike selection.
+_GREEKS_CACHE_MAX_AGE = 2700.0  # DXLink pushes Greeks in batches roughly every ~20-35+ min for this
+# feed, not continuously — measured empirically. 45 min sits just above that observed cadence:
+# tighter than a full hour for fresher rescans, while still comfortably covering a normal batch
+# gap. Strike selection tolerates this because the actual delta is re-verified as a separate hard
+# stop right before entry; this filter mainly guards against stale prior-session rows.
 
 
 def _cache_conn() -> sqlite3.Connection | None:
@@ -142,20 +192,28 @@ def _cache_get_quotes(symbols: list[str]) -> dict[str, dict]:
     return out
 
 
-def _cache_get_chain(expiration: str) -> list | None:
+def _cache_get_chain(expiration: str, symbol: str | None = None) -> list | None:
     """Return cached option chain for a specific expiration date, or None if stale/missing.
 
     Chain structure is stable during a trading day so we use a 4-hour TTL.
     Returns a list of _CachedOption objects matching the SDK Option interface.
+    `symbol` filters to one underlying — XSP and SPX share the same 0DTE
+    expiration date, so an expiration-only lookup would mix both chains.
     """
     conn = _cache_conn()
     if conn is None:
         return None
     try:
-        rows = conn.execute(
-            "SELECT data_json, updated_at FROM stream_chain WHERE expiration = ?",
-            (expiration,),
-        ).fetchall()
+        if symbol:
+            rows = conn.execute(
+                "SELECT data_json, updated_at FROM stream_chain WHERE expiration = ? AND underlying_symbol = ?",
+                (expiration, symbol.upper()),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT data_json, updated_at FROM stream_chain WHERE expiration = ?",
+                (expiration,),
+            ).fetchall()
         if not rows:
             return None
         age = time.time() - min(r["updated_at"] for r in rows)
@@ -228,7 +286,7 @@ def _cache_get_greeks(symbols: list[str]) -> dict[str, dict]:
             symbols,
         ).fetchall()
         for row in rows:
-            if (now - row["updated_at"]) < _CACHE_MAX_AGE:
+            if (now - row["updated_at"]) < _GREEKS_CACHE_MAX_AGE:
                 out[row["symbol"]] = {
                     "delta": row["delta"], "gamma": row["gamma"],
                     "theta": row["theta"], "vega": row["vega"],
@@ -306,13 +364,14 @@ async def _fetch_chain(symbol: str, expiration: str | None = None) -> dict:
         # Try cache first
         target_exp = expiration
         if target_exp is None:
-            # Discover what expiration is cached (nearest to today)
+            # Discover what expiration is cached (nearest to today) for this underlying
             conn = _cache_conn()
             if conn is not None:
                 try:
                     row = conn.execute(
-                        "SELECT expiration FROM stream_chain "
-                        "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1"
+                        "SELECT expiration FROM stream_chain WHERE underlying_symbol = ? "
+                        "ORDER BY ABS(JULIANDAY(expiration) - JULIANDAY('now')) LIMIT 1",
+                        (symbol.upper(),),
                     ).fetchone()
                     if row:
                         target_exp = row["expiration"]
@@ -320,7 +379,7 @@ async def _fetch_chain(symbol: str, expiration: str | None = None) -> dict:
                     conn.close()
 
         if target_exp:
-            cached = _cache_get_chain(target_exp)
+            cached = _cache_get_chain(target_exp, symbol=symbol)
             if cached:
                 exp_date = date.fromisoformat(target_exp)
                 return {exp_date: cached}
@@ -801,14 +860,38 @@ def _closest_by_delta(options, target_delta: float, greeks: dict):
     return best
 
 
+def _nearest_by_strike(options, target_strike: float, exclude_idx: int | None = None):
+    """Find the option whose strike is closest to target_strike (a dollar/point level,
+    not an index offset). Excludes exclude_idx so the long leg can't collapse onto the
+    short leg's own strike when the chain doesn't extend far enough.
+    """
+    best = None
+    best_diff = float("inf")
+    for i, o in enumerate(options):
+        if i == exclude_idx:
+            continue
+        s = _strike(o)
+        if s is None:
+            continue
+        diff = abs(s - target_strike)
+        if diff < best_diff:
+            best_diff = diff
+            best = o
+    return best
+
+
 def _select_call_spread(calls, wing_width, short_delta, greeks):
     if greeks:
         best = _closest_by_delta(calls, short_delta, greeks)
         if best is not None:
             idx = calls.index(best)
-            return calls[idx], calls[min(len(calls) - 1, idx + wing_width)]
+            target = _strike(best) + wing_width
+            long_call = _nearest_by_strike(calls, target, exclude_idx=idx) or calls[-1]
+            return best, long_call
     idx = max(0, int(len(calls) * 0.66) - 1)
-    return calls[idx], calls[min(len(calls) - 1, idx + wing_width)]
+    target = _strike(calls[idx]) + wing_width
+    long_call = _nearest_by_strike(calls, target, exclude_idx=idx) or calls[-1]
+    return calls[idx], long_call
 
 
 def _select_put_spread(puts, wing_width, short_delta, greeks):
@@ -816,9 +899,13 @@ def _select_put_spread(puts, wing_width, short_delta, greeks):
         best = _closest_by_delta(puts, -short_delta, greeks)
         if best is not None:
             idx = puts.index(best)
-            return puts[idx], puts[max(0, idx - wing_width)]
+            target = _strike(best) - wing_width
+            long_put = _nearest_by_strike(puts, target, exclude_idx=idx) or puts[0]
+            return best, long_put
     idx = min(len(puts) - 1, int(len(puts) * 0.33))
-    return puts[idx], puts[max(0, idx - wing_width)]
+    target = _strike(puts[idx]) - wing_width
+    long_put = _nearest_by_strike(puts, target, exclude_idx=idx) or puts[0]
+    return puts[idx], long_put
 
 
 async def cmd_get_working_orders(args) -> dict:
@@ -1131,18 +1218,13 @@ async def cmd_get_gex(args) -> dict:
 
 
 def cmd_stream_status(_args) -> dict:
-    from pathlib import Path as _P
-    pid_file = _P(__file__).parent.parent / "data" / "streamer.pid"
-    pid = None
-    running = False
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text().strip())
-            import os as _os
-            _os.kill(pid, 0)
-            running = True
-        except (ProcessLookupError, PermissionError, ValueError):
-            pid = None
+    # os.kill(pid, 0) is unreliable on Windows (raises SystemError for some
+    # process states) — reuse streamer.py's cross-platform _running_pid(),
+    # which already handles this via psutil/OpenProcess. streamer.py's
+    # top-level imports are all stdlib, so this import is cheap.
+    import streamer as _streamer
+    pid = _streamer._running_pid()
+    running = pid is not None
 
     result: dict = {"ok": True, "running": running, "pid": pid}
 
@@ -1155,15 +1237,40 @@ def cmd_stream_status(_args) -> dict:
         status_row = conn.execute("SELECT * FROM stream_status WHERE id = 1").fetchone()
         if status_row:
             result.update(dict(status_row))
+            # status_row has its own stale "pid" column (written at daemon
+            # startup) that would otherwise clobber the freshly-computed,
+            # authoritative running/pid values checked above.
+            result["running"] = running
+            result["pid"] = pid
 
+        ages = []
         for table, label in (("stream_trades", "trades"), ("stream_quotes", "quotes"), ("stream_greeks", "greeks")):
             try:
                 row = conn.execute(f"SELECT COUNT(*) AS n, MAX(updated_at) AS last FROM {table}").fetchone()
                 age = round(now - row["last"], 1) if row["last"] else None
                 result[f"{label}_symbols"] = row["n"]
                 result[f"{label}_oldest_age_s"] = age
+                if age is not None:
+                    ages.append(age)
             except Exception:
                 pass
+
+        # Stale-cache guardrail: if the daemon reports running but hasn't
+        # written any event in a long time, the persistent connection may be
+        # silently dead (e.g. the session/event-loop deadlock seen 2026-07-01,
+        # which persisted 34+ hours across restarts before manual diagnosis).
+        # Uses the numeric per-table ages above rather than the TEXT
+        # last_event_at column (which is an ISO string, not an epoch float).
+        stale_age_s = min(ages) if ages else None
+        stale = running and (stale_age_s is None or stale_age_s > 600)
+        result["stale_warning"] = stale
+        result["stale_age_s"] = stale_age_s
+        if stale:
+            result["stale_reason"] = (
+                "No stream event written in over 10 minutes despite streamer reporting running"
+                if stale_age_s is not None else
+                "Streamer reports running but has never recorded a stream event"
+            )
     except Exception as exc:
         result["cache_error"] = str(exc)
     finally:
@@ -1354,6 +1461,8 @@ def main():
         sys.exit(1)
 
     result = asyncio.run(fn(args))
+    if isinstance(result, dict) and _last_streamer_http_error is not None:
+        result.setdefault("streamer_http_fallback", _last_streamer_http_error)
     _out(result)
 
 

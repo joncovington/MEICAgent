@@ -1706,7 +1706,8 @@ function _vline(x, label, color) {
   };
 }
 
-function _hline(y, label, color) {
+function _hline(y, label, color, opts) {
+  const solid = opts && opts.solid;
   return {
     id: 'hline_' + label,
     beforeDatasetsDraw(chart) {
@@ -1716,15 +1717,30 @@ function _hline(y, label, color) {
       if (yPx == null || isNaN(yPx)) return;
       const {left, right} = chart.chartArea;
       ctx.save();
-      ctx.setLineDash([4, 4]);
+      if (!solid) ctx.setLineDash([4, 4]);
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = solid ? 2 : 1.5;
       ctx.beginPath(); ctx.moveTo(left, yPx); ctx.lineTo(right, yPx); ctx.stroke();
       ctx.setLineDash([]);
+      // Price tag: a filled badge at the right edge, sitting on the line, instead of
+      // plain floating text — matches the reference GEX-profile layout.
+      ctx.font = 'bold 10px sans-serif';
+      const textW = ctx.measureText(label).width;
+      const padX = 6, tagH = 15;
+      const tagX = right - textW - padX * 2;
+      const tagY = yPx - tagH / 2;
+      ctx.fillStyle = '#0d1117';
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(tagX, tagY, textW + padX * 2, tagH, 3);
+      else ctx.rect(tagX, tagY, textW + padX * 2, tagH);
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.stroke();
       ctx.fillStyle = color;
-      ctx.font = '9px sans-serif';
       ctx.textAlign = 'left';
-      ctx.fillText(label, right - 4, yPx - 3);
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, tagX + padX, yPx + 1);
       ctx.restore();
     }
   };
@@ -1820,11 +1836,11 @@ function renderOiChart(series, spot) {
   opts.plugins.tooltip.callbacks = {
     label: ctx => (ctx.dataset.label || '') + ': ' + Math.abs(ctx.parsed.x).toLocaleString()
   };
-  opts.plugins.hline = spot != null ? _hline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
+  opts.plugins.hline = spot != null ? _hline(spot, '$' + spot.toFixed(2), '#00b4ff', {solid: true}) : {};
   if (gexOiChart) { gexOiChart.destroy(); gexOiChart = null; }
   gexOiChart = new Chart(document.getElementById('gex-oi-chart'),
     { type: 'bar', data: { labels, datasets: ds }, options: opts,
-      plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#f5a623')] : [] });
+      plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#00b4ff', {solid: true})] : [] });
 }
 
 function renderVolChart(series, spot, mode) {
@@ -1850,7 +1866,7 @@ function renderVolChart(series, spot, mode) {
   if (gexVolChart) { gexVolChart.destroy(); gexVolChart = null; }
   gexVolChart = new Chart(document.getElementById('gex-vol-chart'),
     { type: 'bar', data: { labels, datasets: ds }, options: opts,
-      plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#f5a623')] : [] });
+      plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#00b4ff', {solid: true})] : [] });
 }
 
 function renderGexMainChart(series, spot, zero, mode) {
@@ -1891,7 +1907,7 @@ function renderGexMainChart(series, spot, zero, mode) {
   // across whatever strikes are in view, same as OI/Volume.
   _fitChartToViewport('gex-main-chart', 24, 220);
   const hlinePlugins = [];
-  if (spot != null) hlinePlugins.push(_hline(spot, '$' + spot.toFixed(2), 'orange'));
+  if (spot != null) hlinePlugins.push(_hline(spot, '$' + spot.toFixed(2), '#00b4ff', {solid: true}));
   if (zero != null) hlinePlugins.push(_hline(zero, 'Zero Γ: $' + zero.toFixed(2), 'purple'));
   opts.plugins.customHlines = { id: 'customHlines', beforeDatasetsDraw(chart) {
     hlinePlugins.forEach(p => p.beforeDatasetsDraw(chart));

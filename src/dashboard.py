@@ -1649,13 +1649,16 @@ function populateSymbolSelectors(symbols) {
     mainSel.appendChild(o1);
   });
   // Three synced copies of the GEX symbol selector — one per sub-tab (GEX/IV Skew/Volume)
-  // — so it's usable no matter which one is active, not just the GEX tab.
+  // — so it's usable no matter which one is active, not just the GEX tab. Default to SPX
+  // when it's among the traded symbols (regardless of its position in config.json's
+  // `symbols` list), otherwise fall back to whichever symbol is first.
+  const defaultGexSymbol = symbols.includes('SPX') ? 'SPX' : symbols[0];
   document.querySelectorAll('.gex-symbol-select').forEach(sel => {
     symbols.forEach(sym => {
       const o = document.createElement('option'); o.value = sym; o.textContent = sym;
       sel.appendChild(o);
     });
-    sel.value = symbols[0];
+    sel.value = defaultGexSymbol;
   });
 }
 

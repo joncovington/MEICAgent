@@ -1798,7 +1798,7 @@ function _vline(x, label, color) {
 function _categoryPixelForValue(scale, labels, value) {
   if (!labels || !labels.length) return null;
   const n = labels.length;
-  if (n === 1) return scale.getPixelForTick(0);
+  if (n === 1) return (scale.top + scale.bottom) / 2;
   // Find value's fractional position within the (ascending) labels array first, as a
   // continuous "logical index" in [0, n-1], then map that fraction onto the two real
   // endpoint pixels (index 0 and n-1).
@@ -1817,18 +1817,16 @@ function _categoryPixelForValue(scale, labels, value) {
   const frac = hi === lo ? 0 : (value - lo) / (hi - lo);
   const logicalIdx = loIdx + frac;
 
-  // getPixelForTick(index) indexes into the scale's *displayed* ticks, which Chart.js
-  // auto-decimates for readability on a dense category axis (fewer gridlines than actual
-  // strikes) — passing a full-data-array index like n-1 into it can be out of range and
-  // return undefined, which silently hid every overlay (spot/walls/flip/trail) once this
-  // function started returning null across the board. getPixelForValue(value, index)
-  // is the index-based API that works against the full data array regardless of which
-  // ticks are actually drawn — pass the index directly so it doesn't matter whether Chart.js
-  // finds `value` in the label list via its own equality lookup.
-  const p0 = scale.getPixelForValue(labels[0], 0);
-  const p1 = scale.getPixelForValue(labels[n - 1], n - 1);
-  if (p0 == null || p1 == null || isNaN(p0) || isNaN(p1)) return null;
-  return p0 + (p1 - p0) * (logicalIdx / (n - 1));
+  // Both getPixelForTick(index) and getPixelForValue(value, index) gave wrong or
+  // out-of-range results here across two attempts — bypassing Chart.js's per-index scale
+  // methods entirely. scale.top/scale.bottom are the axis's own plain pixel bounds, and
+  // scale.options.reverse tells us which end index 0 (the lowest strike) is drawn at; from
+  // there this is just linear interpolation, nothing left for Chart.js to get "clever" about.
+  const top = scale.top, bottom = scale.bottom;
+  if (top == null || bottom == null || isNaN(top) || isNaN(bottom)) return null;
+  const reversed = !!(scale.options && scale.options.reverse);
+  const posFrac = logicalIdx / (n - 1);  // 0 = lowest-strike label, 1 = highest-strike label
+  return reversed ? (bottom - posFrac * (bottom - top)) : (top + posFrac * (bottom - top));
 }
 
 function _hline(y, label, color, opts) {

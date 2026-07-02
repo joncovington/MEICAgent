@@ -112,8 +112,8 @@ The streamer automatically subscribes to, for **every symbol in `symbols`** (not
 | `max_call_delta_entry` | `0.20` | Hard ceiling on actual short call delta at entry; reject if exceeded regardless of scan result. Raised from 0.17 to keep ~0.02 margin above the 0.18 `delta_target` |
 | `max_call_delta_entry_open_volatile` | `0.19` | Tighter ceiling applied during open_volatile and late sessions |
 | `max_call_delta_entry_late` | `0.19` | Tighter ceiling applied during late session |
-| `min_call_otm_pct` | `0.0053` | Minimum OTM distance for the short call, as a fraction of underlying price (0.53%); reject if call is closer than this. Symbol-agnostic — no rescaling needed when `symbol` changes |
-| `min_put_otm_pct` | `0.004` | Minimum OTM distance for the short put, as a fraction of underlying price (0.4%). Symbol-agnostic |
+| `min_call_otm_pct` | `0.0035` | Minimum OTM distance for the short call, as a fraction of underlying price (0.35%); reject if call is closer than this. Symbol-agnostic — no rescaling needed when `symbol` changes |
+| `min_put_otm_pct` | `0.003` | Minimum OTM distance for the short put, as a fraction of underlying price (0.3%). Symbol-agnostic |
 | `pre_submit_requote_threshold` | `0.03` | Abort live submit if ic_natural_bid has dropped more than this from the dry-run price |
 | `quarterly_expiry_dates_2026` | 4 dates | Last trading days of each quarter; triggers stricter entry rules |
 | `quarterly_expiry_skip_open_volatile` | `true` | Skip all entries during open_volatile session on quarterly expiry dates |
@@ -188,7 +188,7 @@ The streamer automatically subscribes to, for **every symbol in `symbols`** (not
 
    **Call delta hard stop**: if the actual `call_delta_at_entry` from the strategy scan exceeds `max_call_delta_entry` (0.20), reject the entry — do not enter. During open_volatile or late sessions use `max_call_delta_entry_open_volatile`/`max_call_delta_entry_late` (0.19) instead. The delta-0.18 scan target is a heuristic; the actual returned delta must be verified and must fall within this ceiling. This is a non-negotiable hard stop.
 
-   **OTM distance hard stop**: compute OTM distance as a fraction of underlying price — (`strike − underlying_price`) / `underlying_price` for calls, (`underlying_price − strike`) / `underlying_price` for puts. Reject the entry if the short call's fraction is below `min_call_otm_pct` (0.0053), or the short put's fraction is below `min_put_otm_pct` (0.004). Percentage-based so no rescaling is needed if `symbol` changes.
+   **OTM distance hard stop**: compute OTM distance as a fraction of underlying price — (`strike − underlying_price`) / `underlying_price` for calls, (`underlying_price − strike`) / `underlying_price` for puts. Reject the entry if the short call's fraction is below `min_call_otm_pct` (0.0035), or the short put's fraction is below `min_put_otm_pct` (0.003). Percentage-based so no rescaling is needed if `symbol` changes.
 
    **Concurrent IC hard stop**: if the count of currently open ICs **across every symbol combined** equals `max_concurrent_ics`, reject new entries on any symbol until one closes anywhere in the account. This is an account-wide hard cap on simultaneous exposure, independent of daily entry count and not tracked per-symbol — an SPX IC and an XSP IC both count against the same shared limit.
 

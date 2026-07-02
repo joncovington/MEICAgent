@@ -75,8 +75,8 @@
   "max_call_delta_entry": 0.20,
   "max_call_delta_entry_open_volatile": 0.19,
   "max_call_delta_entry_late": 0.19,
-  "min_call_otm_pct": 0.0053,
-  "min_put_otm_pct": 0.004,
+  "min_call_otm_pct": 0.0035,
+  "min_put_otm_pct": 0.003,
   "_otm_pct_note": "OTM distance as a fraction of underlying price, e.g. (strike - underlying_price) / underlying_price for calls. Percentage-based so no rescaling is needed if symbol changes.",
 
   "iv_and_regime_gates_header": "===== IV & Regime Gates =====",

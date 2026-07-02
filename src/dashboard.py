@@ -620,16 +620,36 @@ def _build_gex_data(symbol: str | None = None) -> dict:
                 "SELECT data_json FROM stream_chain WHERE expiration = ? AND underlying_symbol = ?",
                 (expiration, symbol),
             ).fetchall()
-            for r in cache_conn.execute("SELECT * FROM stream_greeks").fetchall():
-                greeks[r["symbol"]] = dict(r)
-            for r in cache_conn.execute("SELECT * FROM stream_quotes").fetchall():
-                quotes[r["symbol"]] = dict(r)
-            # Live open interest comes from DXLink Summary events (stream_oi),
-            # not the static chain snapshot — the chain's own open_interest
-            # field is never populated by the initial metadata fetch, so
-            # reading it directly always yields zero.
-            for r in cache_conn.execute("SELECT * FROM stream_oi").fetchall():
-                oi_cache[r["symbol"]] = r["open_interest"]
+            # Filter greeks/quotes/OI to just this chain's own option symbols — with
+            # multiple traded symbols, an unfiltered SELECT * would scan and load every
+            # other symbol's cached rows too on every GEX refresh, for no benefit.
+            chain_syms: list[str] = []
+            for row in chain_rows:
+                try:
+                    opt = json.loads(row["data_json"])
+                except Exception:
+                    continue
+                s = opt.get("streamer_symbol")
+                if s:
+                    chain_syms.append(s)
+            if chain_syms:
+                placeholders = ", ".join(["?"] * len(chain_syms))
+                for r in cache_conn.execute(
+                    f"SELECT * FROM stream_greeks WHERE symbol IN ({placeholders})", chain_syms
+                ).fetchall():
+                    greeks[r["symbol"]] = dict(r)
+                for r in cache_conn.execute(
+                    f"SELECT * FROM stream_quotes WHERE symbol IN ({placeholders})", chain_syms
+                ).fetchall():
+                    quotes[r["symbol"]] = dict(r)
+                # Live open interest comes from DXLink Summary events (stream_oi),
+                # not the static chain snapshot — the chain's own open_interest
+                # field is never populated by the initial metadata fetch, so
+                # reading it directly always yields zero.
+                for r in cache_conn.execute(
+                    f"SELECT * FROM stream_oi WHERE symbol IN ({placeholders})", chain_syms
+                ).fetchall():
+                    oi_cache[r["symbol"]] = r["open_interest"]
 
     if cache_conn:
         cache_conn.close()
@@ -1341,7 +1361,9 @@ function renderTrades(trades) {
     const pnlCell = t.pnl != null
       ? '<td class="' + (t.pnl > 0 ? 'tppos' : 'tpneg') + '">' + fMoney(t.pnl) + '</td>'
       : '<td class="tpnil">—</td>';
-    const tip = (t.ai_entry_reasoning || '').replace(/"/g, '&quot;');
+    const tip = (t.ai_entry_reasoning || '')
+      .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return '<tr title="' + tip + '">' +
       '<td>' + fTime(t.entry_time) + '</td>' +
       '<td style="color:#6b7280;font-size:10px">' + (t.symbol || '—') + '</td>' +
@@ -1964,7 +1986,10 @@ def main():
         sys.exit(0)
 
     try:
-        server = _ThreadingServer(("", port), _Handler)
+        # Loopback-only: this API has no authentication, and serves trade P&L, credit
+        # amounts, strikes, and AI reasoning text — binding to all interfaces would expose
+        # it to the whole LAN (or the internet, if the port is forwarded).
+        server = _ThreadingServer(("127.0.0.1", port), _Handler)
     except OSError as exc:
         print(f"ERROR: Cannot bind to port {port}: {exc}")
         print(f"Check what is using it: netstat -ano | findstr :{port}")

@@ -31,6 +31,7 @@ import sqlite3
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -683,9 +684,22 @@ _REST_POLL_KEYS_STATIC = [
 _REST_POLL_INTERVAL = 15.0
 
 
-async def _rest_poller(conn: sqlite3.Connection, symbols: list[str]) -> None:
-    """Polls REST endpoints on a fixed cadence and writes results to stream_rest_cache."""
+async def _rest_poller(symbols: list[str]) -> None:
+    """Polls REST endpoints on a fixed cadence and writes results to stream_rest_cache.
+
+    Opens its own SQLite connection rather than sharing state.conn with the main DXLink
+    event loop thread. The two threads write independently and at different cadences
+    (frequent small writes from DXLink listeners vs. a 15s REST poll here); sharing one
+    connection meant a write on either thread could block the other's synchronous
+    conn.execute() for up to sqlite3's default 5s busy timeout (observed live as a
+    "database is locked" warning from this poller — see stall incident 2026-07-02).
+    Since the DXLink SDK's connection-keepalive heartbeat runs on that same event loop,
+    a long enough block there risks starving it past DXLink's 60s keepaliveTimeout,
+    which would silently kill the persistent connection with no client-side exception.
+    A dedicated connection removes this cross-thread contention entirely.
+    """
     import tt
+    conn = _cache_connect()
     fn_map = {
         "get_account_info":    tt.cmd_get_account_info,
         "get_positions":       tt.cmd_get_positions,
@@ -710,7 +724,7 @@ async def _rest_poller(conn: sqlite3.Connection, symbols: list[str]) -> None:
         await asyncio.sleep(_REST_POLL_INTERVAL)
 
 
-def _start_rest_loop(conn: sqlite3.Connection, symbols: list[str]) -> None:
+def _start_rest_loop(symbols: list[str]) -> None:
     """Spin up a dedicated asyncio event loop in a background thread for REST commands."""
     global _rest_loop
 
@@ -719,7 +733,7 @@ def _start_rest_loop(conn: sqlite3.Connection, symbols: list[str]) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         _rest_loop = loop
-        loop.create_task(_rest_poller(conn, symbols))
+        loop.create_task(_rest_poller(symbols))
         loop.run_forever()
 
     t = threading.Thread(target=_run, daemon=True, name="streamer-rest-loop")
@@ -1125,7 +1139,7 @@ async def _main_loop(symbols: list[str]) -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    _start_rest_loop(state.conn, symbols)
+    _start_rest_loop(symbols)
     _start_http_server(state)
 
     # Write PID
@@ -1146,6 +1160,18 @@ async def _main_loop(symbols: list[str]) -> None:
         except Exception as exc:
             if state.stop_event.is_set():
                 break
+            # _run_stream's asyncio.TaskGroup wraps failures in an ExceptionGroup whose own
+            # str() is a generic "N sub-exception(s)" summary with no detail — log each real
+            # sub-exception (type, message, traceback) so a recurrence is diagnosable instead
+            # of a black box (this reconnect fires on effectively every startup; the actual
+            # cause has never been visible in logs/streamer.log before now).
+            if isinstance(exc, BaseExceptionGroup):
+                for i, sub in enumerate(exc.exceptions):
+                    logger.warning(
+                        "Stream error sub-exception %d/%d: %s",
+                        i + 1, len(exc.exceptions),
+                        "".join(traceback.format_exception(type(sub), sub, sub.__traceback__)),
+                    )
             logger.warning("Stream error: %s — reconnecting in %.0fs", exc, delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, _RECONNECT_MAX)

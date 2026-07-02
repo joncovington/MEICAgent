@@ -581,6 +581,20 @@ def _fetch_chain_rest(symbol: str, around_price: float | None = None) -> tuple[l
     return options, greeks, quotes, actual_underlying
 
 
+def _market_open_close_ts() -> tuple[float, float]:
+    """Today's 09:30/16:00 ET as unix timestamps, for the client to map spot_history's
+    ts values onto a time x-axis spanning the trading session."""
+    try:
+        now = datetime.now(_ET)
+        open_dt = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        close_dt = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    except NameError:
+        now = datetime.now(timezone.utc)
+        open_dt = now.replace(hour=13, minute=30, second=0, microsecond=0)
+        close_dt = now.replace(hour=20, minute=0, second=0, microsecond=0)
+    return open_dt.timestamp(), close_dt.timestamp()
+
+
 def _ensure_spot_history_table(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS gex_spot_history (
@@ -824,6 +838,7 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         spot_history = _record_and_fetch_spot_history(hist_conn, symbol, spot)
     finally:
         hist_conn.close()
+    market_open_ts, market_close_ts = _market_open_close_ts()
 
     return {
         "ok":               True,
@@ -833,6 +848,8 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         "source":           source,
         "series":           series,
         "spot_history":     spot_history,
+        "market_open_ts":   market_open_ts,
+        "market_close_ts":  market_close_ts,
         "totals": {
             "total_call_gex": round(total_call_gex),
             "total_put_gex":  round(total_put_gex),
@@ -1941,28 +1958,42 @@ function renderVolChart(series, spot, mode) {
       plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#00b4ff', {solid: true})] : [] });
 }
 
-// Draws each day's spot-price ticks as small light-blue dots at the zero-GEX origin,
-// positioned along the strike (y) axis via the same category interpolation as the
-// reference lines — over the session this traces the day's price path directly on the
-// GEX profile, similar to the reference layout's dotted price trail.
-function _spotHistoryPlugin(history, labels) {
+// Traces the day's spot price as a light-blue line overlaid directly on the GEX profile:
+// Y comes from the same strike-axis category interpolation used for the reference lines
+// (so it lines up with the GEX bars' rows exactly), but X is computed independently from
+// wall-clock time (market open -> close) rather than the bars' own $-value x-axis — the
+// chart's real x-scale is left alone entirely; this is pure manual canvas drawing sharing
+// only the chartArea and y-scale of the underlying chart.
+function _spotHistoryPlugin(history, labels, openTs, closeTs) {
   return {
     id: 'spotHistory',
-    // afterDatasetsDraw, not before — dots sit at x=0, same as where every bar
-    // originates, so drawing before the bars would leave them hidden underneath.
+    // afterDatasetsDraw, not before — a point near a bar's own origin would otherwise be
+    // hidden underneath it.
     afterDatasetsDraw(chart) {
       const {ctx, scales, chartArea} = chart;
-      if (!scales.x || !scales.y || !history || !history.length) return;
-      const xPx = scales.x.getPixelForValue(0);
-      if (xPx == null || isNaN(xPx)) return;
-      ctx.save();
-      ctx.fillStyle = '#7ec8f2';
-      history.forEach(pt => {
+      if (!scales.y || !history || !history.length) return;
+      if (openTs == null || closeTs == null || closeTs <= openTs) return;
+      const pts = [];
+      for (const pt of history) {
+        const frac = (pt.ts - openTs) / (closeTs - openTs);
+        if (frac < 0 || frac > 1) continue;  // outside the trading session
         let yPx = _categoryPixelForValue(scales.y, labels, pt.spot);
-        if (yPx == null || isNaN(yPx)) return;
+        if (yPx == null || isNaN(yPx)) continue;
         yPx = Math.max(chartArea.top, Math.min(chartArea.bottom, yPx));
+        const xPx = chartArea.left + frac * (chartArea.right - chartArea.left);
+        pts.push([xPx, yPx]);
+      }
+      if (!pts.length) return;
+      ctx.save();
+      ctx.strokeStyle = '#7ec8f2';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      pts.forEach(([x, y], i) => { i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+      ctx.stroke();
+      ctx.fillStyle = '#7ec8f2';
+      pts.forEach(([x, y]) => {
         ctx.beginPath();
-        ctx.arc(xPx, yPx, 2, 0, Math.PI * 2);
+        ctx.arc(x, y, 1.5, 0, Math.PI * 2);
         ctx.fill();
       });
       ctx.restore();
@@ -1970,7 +2001,7 @@ function _spotHistoryPlugin(history, labels) {
   };
 }
 
-function renderGexMainChart(series, spot, zero, mode, callWall, putWall, spotHistory) {
+function renderGexMainChart(series, spot, zero, mode, callWall, putWall, spotHistory, marketOpenTs, marketCloseTs) {
   series = _trimToData(series, ['call_gex', 'put_gex', 'net_gex', 'abs_gex'], 3);
   const labels = series.map(s => s.strike);
   let ds, titleText, stacked = false;
@@ -2019,7 +2050,8 @@ function renderGexMainChart(series, spot, zero, mode, callWall, putWall, spotHis
   gexMainChart = new Chart(document.getElementById('gex-main-chart'),
     { type: 'bar', data: { labels, datasets: ds },
       options: opts,
-      plugins: [opts.plugins.customHlines, _spotHistoryPlugin(spotHistory, labels)] });
+      plugins: [opts.plugins.customHlines,
+                _spotHistoryPlugin(spotHistory, labels, marketOpenTs, marketCloseTs)] });
 }
 
 function renderGexMetrics(totals) {
@@ -2048,6 +2080,8 @@ function renderGex(d) {
   const callWall = d.totals && d.totals.call_wall;
   const putWall  = d.totals && d.totals.put_wall;
   const spotHistory = d.spot_history || [];
+  const marketOpenTs  = d.market_open_ts;
+  const marketCloseTs = d.market_close_ts;
   const sym    = d.symbol || '';
   const exp    = d.expiration || '';
   document.getElementById('gex-iv-sub').textContent   = sym + ' Implied Volatility Skew — Exp: ' + exp;
@@ -2059,7 +2093,7 @@ function renderGex(d) {
   renderIvChart(series, spot);
   renderOiChart(series, spot);
   renderVolChart(series, spot, volMode);
-  renderGexMainChart(series, spot, zero, gexMode, callWall, putWall, spotHistory);
+  renderGexMainChart(series, spot, zero, gexMode, callWall, putWall, spotHistory, marketOpenTs, marketCloseTs);
   renderGexMetrics(d.totals);
 }
 

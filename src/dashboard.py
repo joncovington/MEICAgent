@@ -1184,19 +1184,20 @@ nav{flex:1;padding:10px 0}
       <div class="gex-tab-panel active" id="gex-panel-gex">
         <div class="gex-section">
           <div class="gex-section-sub" id="gex-main-sub">&nbsp;</div>
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-            <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">GEX View</span>
-            <div class="radio-group" id="gex-view-group">
-              <label><input type="radio" name="gex_view" value="split"><span>Calls vs Puts</span></label>
-              <label><input type="radio" name="gex_view" value="net" checked><span>&#11044; Net GEX</span></label>
-              <label><input type="radio" name="gex_view" value="abs"><span>Absolute GEX</span></label>
-            </div>
-          </div>
           <div class="gex-row gex-row-main">
             <div class="chart-card">
               <div class="chart-card-title" id="gex-chart-title">GEX by Strike &mdash; Net GEX</div>
               <div style="position:relative;height:260px"><canvas id="gex-main-chart"></canvas></div>
             </div>
+            <div id="gex-main-sidebar">
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px">
+                <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">GEX View</span>
+                <div class="radio-group" id="gex-view-group">
+                  <label><input type="radio" name="gex_view" value="split"><span>Calls vs Puts</span></label>
+                  <label><input type="radio" name="gex_view" value="net" checked><span>&#11044; Net GEX</span></label>
+                  <label><input type="radio" name="gex_view" value="abs"><span>Absolute GEX</span></label>
+                </div>
+              </div>
             <div class="metrics-panel">
               <div class="metrics-panel-title">&#128202; Total GEX</div>
               <div class="metric-row">
@@ -1231,6 +1232,7 @@ nav{flex:1;padding:10px 0}
                 <div class="metric-lbl">Zero Gamma (Flip) <span title="Strike where dealer GEX transitions from negative to positive" style="cursor:help;color:#3d4451">&#9432;</span></div>
                 <div class="metric-val" id="m-zero-gamma">&mdash;</div>
               </div>
+            </div>
             </div>
           </div>
         </div>
@@ -1853,7 +1855,12 @@ function renderGexMainChart(series, spot, zero, mode) {
   opts.plugins.tooltip.callbacks = {
     label: ctx => (ctx.dataset.label||'') + ': ' + fGex(ctx.parsed.x)
   };
-  _growChartHeight('gex-main-chart', labels.length, 18, 260);
+  // Baseline height matches the sidebar (GEX View controls + Total GEX panel) so the chart
+  // fills the available view height instead of sitting at a fixed 260px with empty space
+  // below it; still grows taller than that when strike count needs more room.
+  const sidebar = document.getElementById('gex-main-sidebar');
+  const sidebarH = sidebar ? sidebar.offsetHeight : 260;
+  _growChartHeight('gex-main-chart', labels.length, 18, sidebarH || 260);
   const hlinePlugins = [];
   if (spot != null) hlinePlugins.push(_hline(spot, '$' + spot.toFixed(2), 'orange'));
   if (zero != null) hlinePlugins.push(_hline(zero, 'Zero Γ: $' + zero.toFixed(2), 'purple'));

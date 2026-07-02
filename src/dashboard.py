@@ -1897,7 +1897,7 @@ function renderVolChart(series, spot, mode) {
       plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#00b4ff', {solid: true})] : [] });
 }
 
-function renderGexMainChart(series, spot, zero, mode) {
+function renderGexMainChart(series, spot, zero, mode, callWall, putWall) {
   series = _trimToData(series, ['call_gex', 'put_gex', 'net_gex', 'abs_gex'], 3);
   const labels = series.map(s => s.strike);
   let ds, titleText, stacked = false;
@@ -1937,6 +1937,8 @@ function renderGexMainChart(series, spot, zero, mode) {
   const hlinePlugins = [];
   if (spot != null) hlinePlugins.push(_hline(spot, '$' + spot.toFixed(2), '#00b4ff', {solid: true}));
   if (zero != null) hlinePlugins.push(_hline(zero, 'Zero Γ: $' + zero.toFixed(2), 'purple'));
+  if (callWall != null) hlinePlugins.push(_hline(callWall, 'Call Wall: $' + callWall.toFixed(2), 'yellow'));
+  if (putWall != null) hlinePlugins.push(_hline(putWall, 'Put Wall: $' + putWall.toFixed(2), 'orange'));
   opts.plugins.customHlines = { id: 'customHlines', beforeDatasetsDraw(chart) {
     hlinePlugins.forEach(p => p.beforeDatasetsDraw(chart));
   }};
@@ -1969,6 +1971,8 @@ function renderGex(d) {
   const series = d.series || [];
   const spot   = d.underlying_price;
   const zero   = d.totals && d.totals.zero_gamma;
+  const callWall = d.totals && d.totals.call_wall;
+  const putWall  = d.totals && d.totals.put_wall;
   const sym    = d.symbol || '';
   const exp    = d.expiration || '';
   document.getElementById('gex-iv-sub').textContent   = sym + ' Implied Volatility Skew — Exp: ' + exp;
@@ -1980,7 +1984,7 @@ function renderGex(d) {
   renderIvChart(series, spot);
   renderOiChart(series, spot);
   renderVolChart(series, spot, volMode);
-  renderGexMainChart(series, spot, zero, gexMode);
+  renderGexMainChart(series, spot, zero, gexMode, callWall, putWall);
   renderGexMetrics(d.totals);
 }
 

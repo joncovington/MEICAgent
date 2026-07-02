@@ -653,6 +653,7 @@ def _build_gex_data(symbol: str | None = None) -> dict:
     greeks: dict[str, dict] = {}
     quotes: dict[str, dict] = {}
     oi_cache: dict[str, int] = {}
+    trade_volume: dict[str, float] = {}
     source = "stream_cache"
 
     if cache_conn:
@@ -700,6 +701,14 @@ def _build_gex_data(symbol: str | None = None) -> dict:
                     f"SELECT * FROM stream_oi WHERE symbol IN ({placeholders})", chain_syms
                 ).fetchall():
                     oi_cache[r["symbol"]] = r["open_interest"]
+                # Live per-option volume comes from DXLink Trade events (stream_trades,
+                # written by the same generic _listen_trade the underlyings use) now that
+                # the streamer subscribes Trade for the whole ATM/GEX window, not just
+                # average_daily_volume chain-metadata (which was always 0/stale here).
+                for r in cache_conn.execute(
+                    f"SELECT symbol, volume FROM stream_trades WHERE symbol IN ({placeholders})", chain_syms
+                ).fetchall():
+                    trade_volume[r["symbol"]] = r["volume"]
 
     if cache_conn:
         cache_conn.close()
@@ -769,9 +778,12 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         mult   = float(opt.get("shares_per_contract") or 100)
         if source == "stream_cache":
             oi = int(oi_cache.get(sym) or 0)
+            vol = int(trade_volume.get(sym) or 0)
         else:
             oi = int(opt.get("open_interest") or 0)
-        vol    = int(opt.get("average_daily_volume") or 0)
+            # REST fallback has no streamer-sourced live Trade volume to read; fall back to
+            # the slow-moving chain-metadata field in that path only.
+            vol = int(opt.get("average_daily_volume") or 0)
 
         g = greeks.get(sym, {})
         q = quotes.get(sym, {})

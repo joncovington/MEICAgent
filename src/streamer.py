@@ -356,7 +356,7 @@ async def _run_stream(state: _State, symbols: list[str]) -> None:
             # near-the-money option window (used for both entry strike selection and that
             # symbol's own GEX profile).
             for sym in symbols:
-                tg.create_task(_symbol_refresher(streamer, state, sym, Quote, Greeks, Summary))
+                tg.create_task(_symbol_refresher(streamer, state, sym, Quote, Greeks, Summary, Trade))
 
 
 def _total_subscribed(state: _State) -> int:
@@ -372,8 +372,8 @@ def _total_subscribed(state: _State) -> int:
     window_union: set[str] = set()
     for syms in state.window_syms.values():
         window_union.update(syms)
-    total = len(state.subscribed.get("Trade", []))
-    for key in ("Quote", "Greeks", "Summary"):
+    total = 0
+    for key in ("Trade", "Quote", "Greeks", "Summary"):
         total += len(set(state.subscribed.get(key, [])) | window_union)
     return total
 
@@ -580,7 +580,7 @@ def _atm_window_syms(option_map: dict, center: float, strike_count: int) -> list
     return [sym for sym, o in option_map.items() if float(o.strike_price) in keep]
 
 
-async def _symbol_refresher(streamer, state: _State, symbol: str, Quote, Greeks, Summary) -> None:
+async def _symbol_refresher(streamer, state: _State, symbol: str, Quote, Greeks, Summary, Trade) -> None:
     """Fetch symbol's 0DTE chain at startup and keep its subscription window current.
 
     One instance runs per traded symbol (see _run_stream). Each maintains its own chain,
@@ -589,6 +589,12 @@ async def _symbol_refresher(streamer, state: _State, symbol: str, Quote, Greeks,
     underlying (e.g. .XSP... vs .SPX...). The window is sized to the wider GEX requirement
     (_WINDOW_STRIKE_COUNT) so the same subscription serves both entry strike selection and
     that symbol's own GEX profile — no separate narrower "trading-only" window needed.
+
+    Also subscribes Trade for the window (alongside Quote/Greeks/Summary) so per-option
+    volume is genuinely live rather than the slow-moving average_daily_volume chain-metadata
+    field the dashboard/GEX-by-volume used to fall back to — _listen_trade already writes
+    any symbol's Trade events (day_volume) to stream_trades keyed by symbol, so no separate
+    listener or table is needed here, just widening which symbols get subscribed.
     """
     logger.info("[%s] Fetching 0DTE option chain…", symbol)
     try:
@@ -624,6 +630,7 @@ async def _symbol_refresher(streamer, state: _State, symbol: str, Quote, Greeks,
                         await streamer.subscribe(Quote, list(add))
                         await streamer.subscribe(Greeks, list(add))
                         await streamer.subscribe(Summary, list(add))
+                        await streamer.subscribe(Trade, list(add))
                     if remove:
                         # Only unsubscribe if not also needed by an open IC leg
                         open_legs = set(_open_trade_streamer_symbols())
@@ -632,6 +639,7 @@ async def _symbol_refresher(streamer, state: _State, symbol: str, Quote, Greeks,
                             await streamer.unsubscribe(Quote, list(safe_remove))
                             await streamer.unsubscribe(Greeks, list(safe_remove))
                             await streamer.unsubscribe(Summary, list(safe_remove))
+                            await streamer.unsubscribe(Trade, list(safe_remove))
                     state.window_syms[symbol] = new_syms
                     _upsert_status(state.conn, subscribed_symbols=_total_subscribed(state))
                     logger.info(

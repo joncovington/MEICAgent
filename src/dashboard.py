@@ -776,6 +776,11 @@ def _build_gex_data(symbol: str | None = None) -> dict:
     max_gex_s      = max(series, key=lambda s: s["abs_gex"], default=None)
     # _compute_zero_gamma interpolates from series which already has scaled strikes
     zero_gamma     = _compute_zero_gamma(series)
+    # Call/put walls: the strike with the largest gamma concentration on each side —
+    # dealer resistance levels. series stores put_gex as a negative value (see above),
+    # so the wall is the most negative entry, not the largest.
+    call_wall_s = max(series, key=lambda s: s["call_gex"], default=None)
+    put_wall_s  = min(series, key=lambda s: s["put_gex"], default=None)
 
     return {
         "ok":               True,
@@ -790,6 +795,8 @@ def _build_gex_data(symbol: str | None = None) -> dict:
             "net_gex":        round(net_gex_total),
             "max_gex_strike": max_gex_s["strike"] if max_gex_s else None,
             "zero_gamma":     zero_gamma,
+            "call_wall":      call_wall_s["strike"] if call_wall_s else None,
+            "put_wall":       put_wall_s["strike"] if put_wall_s else None,
         },
     }
 
@@ -1209,6 +1216,15 @@ nav{flex:1;padding:10px 0}
               <div class="metric-row">
                 <div class="metric-lbl">Max GEX Strike</div>
                 <div class="metric-val" id="m-max-strike">&mdash;</div>
+              </div>
+              <div class="metric-divider"></div>
+              <div class="metric-row">
+                <div class="metric-lbl">Call Wall <span title="Strike with the largest call-side gamma concentration — dealer resistance above spot" style="cursor:help;color:#3d4451">&#9432;</span></div>
+                <div class="metric-val pos" id="m-call-wall">&mdash;</div>
+              </div>
+              <div class="metric-row">
+                <div class="metric-lbl">Put Wall <span title="Strike with the largest put-side gamma concentration — dealer support below spot" style="cursor:help;color:#3d4451">&#9432;</span></div>
+                <div class="metric-val neg" id="m-put-wall">&mdash;</div>
               </div>
               <div class="metric-divider"></div>
               <div class="metric-row" style="margin-bottom:0">
@@ -1790,6 +1806,8 @@ function renderGexMetrics(totals) {
   netEl.textContent = fGex(t.net_gex);
   netEl.className = 'metric-val ' + (t.net_gex >= 0 ? 'pos' : 'neg');
   document.getElementById('m-max-strike').textContent = t.max_gex_strike != null ? '$' + t.max_gex_strike : '—';
+  document.getElementById('m-call-wall').textContent = t.call_wall != null ? '$' + t.call_wall : '—';
+  document.getElementById('m-put-wall').textContent = t.put_wall != null ? '$' + t.put_wall : '—';
   document.getElementById('m-zero-gamma').textContent = t.zero_gamma != null ? '$' + t.zero_gamma.toFixed(2) : '—';
 }
 

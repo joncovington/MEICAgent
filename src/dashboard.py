@@ -1675,6 +1675,44 @@ function _vline(x, label, color) {
   };
 }
 
+function _hline(y, label, color) {
+  return {
+    id: 'hline_' + label,
+    beforeDatasetsDraw(chart) {
+      const {ctx, scales} = chart;
+      if (!scales.y) return;
+      const yPx = scales.y.getPixelForValue(y);
+      if (yPx == null || isNaN(yPx)) return;
+      const {left, right} = chart.chartArea;
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(left, yPx); ctx.lineTo(right, yPx); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(label, right - 4, yPx - 3);
+      ctx.restore();
+    }
+  };
+}
+
+// Trim a by-strike series to the contiguous band around its non-zero data, padded by
+// `pad` strikes on each side — a horizontal strike ladder otherwise wastes most of its
+// height on far-OTM strikes with no meaningful bar (the fetched window is wider than
+// what's worth plotting).
+function _trimToData(series, valueKeys, pad) {
+  let lo = -1, hi = -1;
+  for (let i = 0; i < series.length; i++) {
+    const nonZero = valueKeys.some(k => Math.abs(series[i][k] || 0) > 0);
+    if (nonZero) { if (lo === -1) lo = i; hi = i; }
+  }
+  if (lo === -1) return series;
+  return series.slice(Math.max(0, lo - pad), Math.min(series.length, hi + pad + 1));
+}
+
 function _baseOpts(plugins) {
   return {
     responsive: true, maintainAspectRatio: false,
@@ -1714,30 +1752,35 @@ function renderIvChart(series, spot) {
 }
 
 function renderOiChart(series, spot) {
+  series = _trimToData(series, ['call_oi', 'put_oi'], 3);
   const labels = series.map(s => s.strike);
-  // Calls positive (up), puts negated (down) — mirrored bars like reference barmode='relative'
+  // Calls positive (right), puts negated (left) — mirrored horizontal bars
   const ds = [
     { label: 'Call OI', data: series.map(s => s.call_oi),  backgroundColor: 'green' },
     { label: 'Put OI',  data: series.map(s => -s.put_oi),  backgroundColor: 'red' },
   ];
   const opts = _baseOpts();
-  opts.scales.x.title = { display: true, text: 'Strike', color: '#6b7280' };
-  opts.scales.y.title = { display: true, text: 'Open Interest', color: '#6b7280' };
+  opts.indexAxis = 'y';
+  opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
+  opts.scales.x.title = { display: true, text: 'Open Interest', color: '#6b7280' };
   opts.scales.x.stacked = true;
   opts.scales.y.stacked = true;
   opts.plugins.tooltip.callbacks = {
-    label: ctx => (ctx.dataset.label || '') + ': ' + Math.abs(ctx.parsed.y).toLocaleString()
+    label: ctx => (ctx.dataset.label || '') + ': ' + Math.abs(ctx.parsed.x).toLocaleString()
   };
-  opts.plugins.vline = spot != null ? _vline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
-  if (gexOiChart) { gexOiChart.data.labels = labels; gexOiChart.data.datasets = ds; gexOiChart.update(); return; }
-  gexOiChart = new Chart(document.getElementById('gex-oi-chart'), { type: 'bar', data: { labels, datasets: ds }, options: opts });
+  opts.plugins.hline = spot != null ? _hline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
+  if (gexOiChart) { gexOiChart.destroy(); gexOiChart = null; }
+  gexOiChart = new Chart(document.getElementById('gex-oi-chart'),
+    { type: 'bar', data: { labels, datasets: ds }, options: opts,
+      plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#f5a623')] : [] });
 }
 
 function renderVolChart(series, spot, mode) {
+  series = _trimToData(series, ['call_vol', 'put_vol', 'total_vol'], 3);
   const labels = series.map(s => s.strike);
   let ds;
   if (mode === 'split') {
-    // Calls positive (lightgreen up), puts negated (lightcoral down) — matches reference
+    // Calls positive (right), puts negated (left) — mirrored horizontal bars
     ds = [
       { label: 'Call Volume', data: series.map(s => s.call_vol),  backgroundColor: 'lightgreen' },
       { label: 'Put Volume',  data: series.map(s => -s.put_vol),  backgroundColor: 'lightcoral' },
@@ -1746,20 +1789,23 @@ function renderVolChart(series, spot, mode) {
     ds = [{ label: 'Total Volume', data: series.map(s => s.total_vol), backgroundColor: 'purple' }];
   }
   const opts = _baseOpts();
-  opts.scales.x.title = { display: true, text: 'Strike', color: '#6b7280' };
-  opts.scales.y.title = { display: true, text: 'Volume', color: '#6b7280' };
+  opts.indexAxis = 'y';
+  opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
+  opts.scales.x.title = { display: true, text: 'Volume', color: '#6b7280' };
   if (mode === 'split') { opts.scales.x.stacked = true; opts.scales.y.stacked = true; }
-  opts.plugins.tooltip.callbacks = { label: ctx => (ctx.dataset.label||'') + ': ' + Math.abs(ctx.parsed.y).toLocaleString() };
-  opts.plugins.vline = spot != null ? _vline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
+  opts.plugins.tooltip.callbacks = { label: ctx => (ctx.dataset.label||'') + ': ' + Math.abs(ctx.parsed.x).toLocaleString() };
   if (gexVolChart) { gexVolChart.destroy(); gexVolChart = null; }
-  gexVolChart = new Chart(document.getElementById('gex-vol-chart'), { type: 'bar', data: { labels, datasets: ds }, options: opts });
+  gexVolChart = new Chart(document.getElementById('gex-vol-chart'),
+    { type: 'bar', data: { labels, datasets: ds }, options: opts,
+      plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#f5a623')] : [] });
 }
 
 function renderGexMainChart(series, spot, zero, mode) {
+  series = _trimToData(series, ['call_gex', 'put_gex', 'net_gex', 'abs_gex'], 3);
   const labels = series.map(s => s.strike);
   let ds, titleText, stacked = false;
   if (mode === 'split') {
-    // Calls positive (green up), puts already negative in data (red down) — relative stacked bars
+    // Calls positive (right), puts already negative in data (left) — relative stacked bars
     ds = [
       { label: 'Call GEX', data: series.map(s => s.call_gex), backgroundColor: 'green' },
       { label: 'Put GEX',  data: series.map(s => s.put_gex),  backgroundColor: 'red' },
@@ -1778,23 +1824,24 @@ function renderGexMainChart(series, spot, zero, mode) {
   }
   document.getElementById('gex-chart-title').textContent = titleText;
   const opts = _baseOpts();
-  opts.scales.x.title = { display: true, text: 'Strike Price', color: '#6b7280' };
-  opts.scales.y.title = { display: true, text: 'Gamma Exposure ($)', color: '#6b7280' };
+  opts.indexAxis = 'y';
+  opts.scales.y.title = { display: true, text: 'Strike Price', color: '#6b7280' };
+  opts.scales.x.title = { display: true, text: 'Gamma Exposure ($)', color: '#6b7280' };
   if (stacked) { opts.scales.x.stacked = true; opts.scales.y.stacked = true; }
-  opts.scales.y.ticks.callback = v => fGex(v);
+  opts.scales.x.ticks.callback = v => fGex(v);
   opts.plugins.tooltip.callbacks = {
-    label: ctx => (ctx.dataset.label||'') + ': ' + fGex(ctx.parsed.y)
+    label: ctx => (ctx.dataset.label||'') + ': ' + fGex(ctx.parsed.x)
   };
-  const vlinePlugins = [];
-  if (spot != null) vlinePlugins.push(_vline(spot, '$' + spot.toFixed(2), 'orange'));
-  if (zero != null) vlinePlugins.push(_vline(zero, 'Zero Γ: $' + zero.toFixed(2), 'purple'));
-  opts.plugins.customVlines = { id: 'customVlines', beforeDatasetsDraw(chart) {
-    vlinePlugins.forEach(p => p.beforeDatasetsDraw(chart));
+  const hlinePlugins = [];
+  if (spot != null) hlinePlugins.push(_hline(spot, '$' + spot.toFixed(2), 'orange'));
+  if (zero != null) hlinePlugins.push(_hline(zero, 'Zero Γ: $' + zero.toFixed(2), 'purple'));
+  opts.plugins.customHlines = { id: 'customHlines', beforeDatasetsDraw(chart) {
+    hlinePlugins.forEach(p => p.beforeDatasetsDraw(chart));
   }};
   if (gexMainChart) { gexMainChart.destroy(); gexMainChart = null; }
   gexMainChart = new Chart(document.getElementById('gex-main-chart'),
     { type: 'bar', data: { labels, datasets: ds },
-      options: opts, plugins: [opts.plugins.customVlines] });
+      options: opts, plugins: [opts.plugins.customHlines] });
 }
 
 function renderGexMetrics(totals) {

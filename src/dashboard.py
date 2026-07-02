@@ -788,26 +788,33 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         # gates entries on via `get_gex`.
         _s = gex_spot or 0
         gex = gamma * oi * mult * _s * _s * 0.01
+        # Volume-based GEX: same dollar-gamma formula, substituting traded volume for open
+        # interest — a "flow" reading alongside the "positioning" one. Note call_vol/put_vol
+        # here is average_daily_volume from chain metadata (see `vol` above), not today's
+        # live intraday volume, so this shares that same staleness characteristic.
+        gex_vol = gamma * vol * mult * _s * _s * 0.01
         if "P" in otype:
             gex = -gex
+            gex_vol = -gex_vol
 
         if strike not in strikes:
             strikes[strike] = {
-                "call_gamma": 0, "call_iv": 0, "call_oi": 0, "call_vol": 0, "call_gex": 0,
-                "put_gamma":  0, "put_iv":  0, "put_oi":  0, "put_vol":  0, "put_gex":  0,
+                "call_gamma": 0, "call_iv": 0, "call_oi": 0, "call_vol": 0, "call_gex": 0, "call_gex_vol": 0,
+                "put_gamma":  0, "put_iv":  0, "put_oi":  0, "put_vol":  0, "put_gex":  0, "put_gex_vol":  0,
             }
         d = strikes[strike]
         if "C" in otype:
             d["call_gamma"] = gamma; d["call_iv"] = round(iv, 2)
-            d["call_oi"] = oi;       d["call_vol"] = vol; d["call_gex"] = gex
+            d["call_oi"] = oi;       d["call_vol"] = vol; d["call_gex"] = gex; d["call_gex_vol"] = gex_vol
         elif "P" in otype:
             d["put_gamma"]  = gamma; d["put_iv"]  = round(iv, 2)
-            d["put_oi"]  = oi;       d["put_vol"]  = vol; d["put_gex"]  = gex
+            d["put_oi"]  = oi;       d["put_vol"]  = vol; d["put_gex"]  = gex; d["put_gex_vol"]  = gex_vol
 
     series = []
     for strike in sorted(strikes):
         d = strikes[strike]
         net = d["call_gex"] + d["put_gex"]
+        net_vol = d["call_gex_vol"] + d["put_gex_vol"]
         series.append({
             "strike":      round(strike * strike_scale, 2),
             "call_iv":     d["call_iv"],   "put_iv":      d["put_iv"],
@@ -818,6 +825,7 @@ def _build_gex_data(symbol: str | None = None) -> dict:
             "put_gex":     round(d["put_gex"]),   # negative value
             "net_gex":     round(net),
             "abs_gex":     round(abs(net)),
+            "net_gex_vol": round(net_vol),
         })
 
     total_call_gex = sum(s["call_gex"] for s in series if s["call_gex"] > 0)
@@ -1261,7 +1269,7 @@ nav{flex:1;padding:10px 0}
               <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px">
                 <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">GEX View</span>
                 <div class="radio-group" id="gex-view-group">
-                  <label><input type="radio" name="gex_view" value="split"><span>Calls vs Puts</span></label>
+                  <label><input type="radio" name="gex_view" value="oivol"><span>Net GEX (OI vs Volume)</span></label>
                   <label><input type="radio" name="gex_view" value="net" checked><span>&#11044; Net GEX</span></label>
                   <label><input type="radio" name="gex_view" value="abs"><span>Absolute GEX</span></label>
                 </div>
@@ -2012,17 +2020,22 @@ function _spotHistoryPlugin(history, labels, openTs, closeTs) {
 }
 
 function renderGexMainChart(series, spot, zero, mode, callWall, putWall, spotHistory, marketOpenTs, marketCloseTs) {
-  series = _trimToData(series, ['call_gex', 'put_gex', 'net_gex', 'abs_gex'], 3);
+  series = _trimToData(series, ['call_gex', 'put_gex', 'net_gex', 'abs_gex', 'net_gex_vol'], 3);
   const labels = series.map(s => s.strike);
   let ds, titleText, stacked = false;
-  if (mode === 'split') {
-    // Calls positive (right), puts already negative in data (left) — relative stacked bars
+  if (mode === 'oivol') {
+    // Two side-by-side (grouped, not stacked/overlapping) bars per strike: net GEX from
+    // open interest (dark green/red) vs. net GEX from volume (light green/red) — a
+    // "positioning" vs. "flow" comparison at each strike.
     ds = [
-      { label: 'Call GEX', data: series.map(s => s.call_gex), backgroundColor: 'green' },
-      { label: 'Put GEX',  data: series.map(s => s.put_gex),  backgroundColor: 'red' },
+      { label: 'Net GEX (OI)',
+        data: series.map(s => s.net_gex),
+        backgroundColor: series.map(s => s.net_gex >= 0 ? 'green' : 'red') },
+      { label: 'Net GEX (Volume)',
+        data: series.map(s => s.net_gex_vol),
+        backgroundColor: series.map(s => s.net_gex_vol >= 0 ? 'lightgreen' : 'lightcoral') },
     ];
-    titleText = 'GEX by Strike — Calls vs Puts';
-    stacked = true;
+    titleText = 'GEX by Strike — Net GEX (OI vs Volume)';
   } else if (mode === 'abs') {
     ds = [{ label: '|Net GEX|', data: series.map(s => s.abs_gex), backgroundColor: 'blue' }];
     titleText = 'GEX by Strike — Absolute GEX';

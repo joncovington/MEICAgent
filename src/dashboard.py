@@ -1795,21 +1795,32 @@ function _vline(x, label, color) {
 function _categoryPixelForValue(scale, labels, value) {
   if (!labels || !labels.length) return null;
   const n = labels.length;
-  const clampIdx = i => Math.max(0, Math.min(n - 1, i));
-  let loIdx = 0;
-  for (let i = 0; i < n - 1; i++) {
-    if (value >= labels[i] && value <= labels[i + 1]) { loIdx = i; break; }
-    if (value < labels[0]) { loIdx = 0; break; }
-    if (value > labels[n - 1]) { loIdx = n - 2; break; }
+  if (n === 1) return scale.getPixelForTick(0);
+  // Find value's fractional position within the (ascending) labels array first, as a
+  // continuous "logical index" in [0, n-1], then map that fraction onto the two real
+  // endpoint pixels (index 0 and n-1) — calling getPixelForTick per intermediate index
+  // was landing at the wrong height once the axis was reversed (highest strike on top);
+  // endpoints are the one pair getPixelForTick is guaranteed to place correctly, so
+  // interpolating between just those two sidesteps whatever went wrong for the rest.
+  let loIdx;
+  if (value <= labels[0]) {
+    loIdx = 0;
+  } else if (value >= labels[n - 1]) {
+    loIdx = n - 2;
+  } else {
+    loIdx = 0;
+    for (let i = 0; i < n - 1; i++) {
+      if (value >= labels[i] && value <= labels[i + 1]) { loIdx = i; break; }
+    }
   }
-  const hiIdx = clampIdx(loIdx + 1);
-  const lo = labels[loIdx], hi = labels[hiIdx];
-  const p0 = scale.getPixelForTick(loIdx);
-  const p1 = scale.getPixelForTick(hiIdx);
+  const lo = labels[loIdx], hi = labels[loIdx + 1];
+  const frac = hi === lo ? 0 : (value - lo) / (hi - lo);
+  const logicalIdx = loIdx + frac;
+
+  const p0 = scale.getPixelForTick(0);
+  const p1 = scale.getPixelForTick(n - 1);
   if (p0 == null || p1 == null || isNaN(p0) || isNaN(p1)) return null;
-  if (hi === lo) return p0;
-  const frac = (value - lo) / (hi - lo);
-  return p0 + (p1 - p0) * frac;
+  return p0 + (p1 - p0) * (logicalIdx / (n - 1));
 }
 
 function _hline(y, label, color, opts) {

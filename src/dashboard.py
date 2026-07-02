@@ -925,12 +925,15 @@ nav{flex:1;padding:10px 0}
 .gex-row{display:grid;gap:16px;margin-bottom:16px}
 .gex-row-2{grid-template-columns:1fr 1fr}
 .gex-row-main{grid-template-columns:1fr 280px}
-.gex-tabs{display:flex;gap:0;padding:12px 24px 0;border-bottom:1px solid #1e2430}
-.gex-tab{font-size:11px;font-weight:700;color:#6b7280;padding:6px 14px;cursor:pointer;
-         border-bottom:2px solid transparent;margin-bottom:-1px;text-transform:uppercase;
-         letter-spacing:.8px;transition:color .15s,border-color .15s}
+.gex-body{display:flex;align-items:flex-start}
+.gex-tabs{display:flex;flex-direction:column;gap:2px;padding:12px 8px;flex:0 0 84px;
+          border-right:1px solid #1e2430;align-self:stretch}
+.gex-tab{font-size:11px;font-weight:700;color:#6b7280;padding:8px 10px;cursor:pointer;
+         border-right:2px solid transparent;margin-right:-1px;text-transform:uppercase;
+         letter-spacing:.8px;transition:color .15s,border-color .15s;border-radius:4px 0 0 4px}
 .gex-tab:hover{color:#e6edf3}
-.gex-tab.active{color:#00c896;border-bottom-color:#00c896}
+.gex-tab.active{color:#00c896;border-right-color:#00c896;background:#0d2018}
+.gex-tab-panels{flex:1;min-width:0}
 .gex-tab-panel{display:none}.gex-tab-panel.active{display:block}
 .chart-card{background:#0d1117;border:1px solid #1e2430;border-radius:6px;padding:14px 16px}
 .chart-card-title{font-size:10px;font-weight:700;color:#6b7280;letter-spacing:1.2px;
@@ -1173,12 +1176,14 @@ nav{flex:1;padding:10px 0}
         <span id="gex-source-badge" style="font-size:10px;color:#6b7280;margin-left:4px"></span>
       </div>
 
-      <!-- Sub-tabs -->
+      <div class="gex-body">
+      <!-- Sub-tabs: narrow vertical nav on the left, one panel visible at a time -->
       <div class="gex-tabs">
         <div class="gex-tab active" data-gex-tab="gex">GEX</div>
         <div class="gex-tab" data-gex-tab="ivskew">IV Skew</div>
         <div class="gex-tab" data-gex-tab="volume">Volume</div>
       </div>
+      <div class="gex-tab-panels">
 
       <!-- Tab: GEX -->
       <div class="gex-tab-panel active" id="gex-panel-gex">
@@ -1269,6 +1274,9 @@ nav{flex:1;padding:10px 0}
             <div style="position:relative;height:260px"><canvas id="gex-vol-chart"></canvas></div>
           </div>
         </div>
+      </div>
+
+      </div>
       </div>
 
     </div>

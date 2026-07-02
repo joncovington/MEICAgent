@@ -1192,10 +1192,10 @@ nav{flex:1;padding:10px 0}
                    was last selected here. -->
               <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px">
                 <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Symbol</span>
-                <select id="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
+                <select id="gex-symbol-select" class="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
                         border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;outline:none">
                 </select>
-                <span id="gex-source-badge" style="font-size:10px;color:#6b7280"></span>
+                <span id="gex-source-badge" class="gex-source-badge" style="font-size:10px;color:#6b7280"></span>
               </div>
               <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px">
                 <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">GEX View</span>
@@ -1248,6 +1248,13 @@ nav{flex:1;padding:10px 0}
       <!-- Tab: IV Skew -->
       <div class="gex-tab-panel" id="gex-panel-ivskew">
         <div class="gex-section">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Symbol</span>
+            <select id="gex-symbol-select-iv" class="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
+                    border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;outline:none">
+            </select>
+            <span id="gex-source-badge-iv" class="gex-source-badge" style="font-size:10px;color:#6b7280"></span>
+          </div>
           <div class="gex-section-sub" id="gex-iv-sub">&nbsp;</div>
           <div class="gex-row gex-row-2">
             <div class="chart-card">
@@ -1265,6 +1272,13 @@ nav{flex:1;padding:10px 0}
       <!-- Tab: Volume -->
       <div class="gex-tab-panel" id="gex-panel-volume">
         <div class="gex-section">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Symbol</span>
+            <select id="gex-symbol-select-vol" class="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
+                    border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;outline:none">
+            </select>
+            <span id="gex-source-badge-vol" class="gex-source-badge" style="font-size:10px;color:#6b7280"></span>
+          </div>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
             <div class="gex-section-title" style="margin:0">&#128200; Volume by Strike</div>
             <div class="radio-group" id="vol-view-group" style="margin-bottom:0">
@@ -1549,14 +1563,19 @@ function populateSymbolSelectors(symbols) {
   if (symbolsPopulated || !symbols || !symbols.length) return;
   symbolsPopulated = true;
   const mainSel = document.getElementById('main-symbol-select');
-  const gexSel = document.getElementById('gex-symbol-select');
   symbols.forEach(sym => {
     const o1 = document.createElement('option'); o1.value = sym; o1.textContent = sym;
     mainSel.appendChild(o1);
-    const o2 = document.createElement('option'); o2.value = sym; o2.textContent = sym;
-    gexSel.appendChild(o2);
   });
-  gexSel.value = symbols[0];
+  // Three synced copies of the GEX symbol selector — one per sub-tab (GEX/IV Skew/Volume)
+  // — so it's usable no matter which one is active, not just the GEX tab.
+  document.querySelectorAll('.gex-symbol-select').forEach(sel => {
+    symbols.forEach(sym => {
+      const o = document.createElement('option'); o.value = sym; o.textContent = sym;
+      sel.appendChild(o);
+    });
+    sel.value = symbols[0];
+  });
 }
 
 // ── render all ────────────────────────────────────────────────────────────────
@@ -1725,14 +1744,18 @@ function _trimToData(series, valueKeys, pad) {
   return series.slice(Math.max(0, lo - pad), Math.min(series.length, hi + pad + 1));
 }
 
-// Fixed-height containers squeeze bar thickness down as strike count grows — grow the
-// container to fit instead, so each bar keeps a consistent, readable thickness regardless
-// of how many strikes _trimToData left in view.
-function _growChartHeight(canvasId, numRows, perRow, minH) {
+// Sizes the gamma-exposure chart's container to exactly fill the remaining viewport height
+// below it, so the chart spans the view without ever causing page scroll — bar thickness
+// then falls out of Chart.js's own relative sizing (barPercentage/categoryPercentage
+// defaults) dividing that fixed height across however many strikes are shown, same as
+// OI/Volume, rather than growing the container per strike.
+function _fitChartToViewport(canvasId, bottomPad, minH) {
   const canvas = document.getElementById(canvasId);
   const wrap = canvas && canvas.parentElement;
   if (!wrap) return;
-  wrap.style.height = Math.max(minH, numRows * perRow) + 'px';
+  const top = wrap.getBoundingClientRect().top;
+  const avail = window.innerHeight - top - (bottomPad || 24);
+  wrap.style.height = Math.max(minH || 220, avail) + 'px';
 }
 
 function _baseOpts(plugins) {
@@ -1788,8 +1811,8 @@ function renderOiChart(series, spot) {
   ];
   const opts = _baseOpts();
   opts.indexAxis = 'y';
-  opts.datasets = { bar: { minBarThickness: 14 } };
   opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
+  opts.scales.y.reverse = true;  // highest strike at top, lowest at bottom
   opts.scales.x.title = { display: true, text: 'Open Interest / Volume', color: '#6b7280' };
   // grouped:false makes same-category datasets overlap (full width, drawn in array order)
   // instead of Chart.js's default of splitting each dataset into its own thin sub-bar.
@@ -1798,7 +1821,6 @@ function renderOiChart(series, spot) {
     label: ctx => (ctx.dataset.label || '') + ': ' + Math.abs(ctx.parsed.x).toLocaleString()
   };
   opts.plugins.hline = spot != null ? _hline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
-  _growChartHeight('gex-oi-chart', labels.length, 18, 220);
   if (gexOiChart) { gexOiChart.destroy(); gexOiChart = null; }
   gexOiChart = new Chart(document.getElementById('gex-oi-chart'),
     { type: 'bar', data: { labels, datasets: ds }, options: opts,
@@ -1820,12 +1842,11 @@ function renderVolChart(series, spot, mode) {
   }
   const opts = _baseOpts();
   opts.indexAxis = 'y';
-  opts.datasets = { bar: { minBarThickness: 14 } };
   opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
+  opts.scales.y.reverse = true;  // highest strike at top, lowest at bottom
   opts.scales.x.title = { display: true, text: 'Volume', color: '#6b7280' };
   if (mode === 'split') { opts.scales.x.stacked = true; opts.scales.y.stacked = true; }
   opts.plugins.tooltip.callbacks = { label: ctx => (ctx.dataset.label||'') + ': ' + Math.abs(ctx.parsed.x).toLocaleString() };
-  _growChartHeight('gex-vol-chart', labels.length, 18, 260);
   if (gexVolChart) { gexVolChart.destroy(); gexVolChart = null; }
   gexVolChart = new Chart(document.getElementById('gex-vol-chart'),
     { type: 'bar', data: { labels, datasets: ds }, options: opts,
@@ -1857,20 +1878,18 @@ function renderGexMainChart(series, spot, zero, mode) {
   document.getElementById('gex-chart-title').textContent = titleText;
   const opts = _baseOpts();
   opts.indexAxis = 'y';
-  opts.datasets = { bar: { minBarThickness: 14 } };
   opts.scales.y.title = { display: true, text: 'Strike Price', color: '#6b7280' };
+  opts.scales.y.reverse = true;  // highest strike at top, lowest at bottom
   opts.scales.x.title = { display: true, text: 'Gamma Exposure ($)', color: '#6b7280' };
   if (stacked) { opts.scales.x.stacked = true; opts.scales.y.stacked = true; }
   opts.scales.x.ticks.callback = v => fGex(v);
   opts.plugins.tooltip.callbacks = {
     label: ctx => (ctx.dataset.label||'') + ': ' + fGex(ctx.parsed.x)
   };
-  // Baseline height matches the sidebar (GEX View controls + Total GEX panel) so the chart
-  // fills the available view height instead of sitting at a fixed 260px with empty space
-  // below it; still grows taller than that when strike count needs more room.
-  const sidebar = document.getElementById('gex-main-sidebar');
-  const sidebarH = sidebar ? sidebar.offsetHeight : 260;
-  _growChartHeight('gex-main-chart', labels.length, 18, sidebarH || 260);
+  // Fits the chart to exactly the remaining viewport height so it spans the view without
+  // causing page scroll; bar thickness then comes from Chart.js's own relative sizing
+  // across whatever strikes are in view, same as OI/Volume.
+  _fitChartToViewport('gex-main-chart', 24, 220);
   const hlinePlugins = [];
   if (spot != null) hlinePlugins.push(_hline(spot, '$' + spot.toFixed(2), 'orange'));
   if (zero != null) hlinePlugins.push(_hline(zero, 'Zero Γ: $' + zero.toFixed(2), 'purple'));
@@ -1922,30 +1941,37 @@ function renderGex(d) {
 }
 
 function _initGexSymbol() {
-  // Sync dropdown to last-loaded symbol; otherwise leave SPX (the HTML default)
+  // Sync all three dropdowns to the last-loaded symbol; otherwise leave the HTML default
   if (!gexData) return;
   const sym = (gexData.symbol || '').toUpperCase();
-  const sel = document.getElementById('gex-symbol-select');
-  if ([...sel.options].some(o => o.value === sym)) {
-    sel.value = sym;
-  }
+  document.querySelectorAll('.gex-symbol-select').forEach(sel => {
+    if ([...sel.options].some(o => o.value === sym)) sel.value = sym;
+  });
 }
 
 function gexSymbol() {
-  const sel = document.getElementById('gex-symbol-select');
+  // Any of the three selectors could be the one the user just changed — all three are
+  // kept in sync on 'change' (see the listener below), so reading the first is enough.
+  const sel = document.querySelector('.gex-symbol-select');
+  if (!sel) return '';
   return sel.value || (sel.options.length ? sel.options[0].value : '');
+}
+
+function _setGexBadges(text, color) {
+  document.querySelectorAll('.gex-source-badge').forEach(b => {
+    b.textContent = text;
+    b.style.color = color || '#6b7280';
+  });
 }
 
 async function fetchGex() {
   const sym = gexSymbol();
   if (!sym) return;  // selector not populated yet — wait for the next auto-refresh tick
-  const badge = document.getElementById('gex-source-badge');
-  badge.textContent = 'Loading…';
+  _setGexBadges('Loading…');
   try {
     const r = await fetch('/api/gex?symbol=' + encodeURIComponent(sym));
     if (!r.ok) {
-      badge.textContent = 'HTTP ' + r.status;
-      badge.style.color = '#e8423a';
+      _setGexBadges('HTTP ' + r.status, '#e8423a');
       return;
     }
     const d = await r.json();
@@ -1955,21 +1981,18 @@ async function fetchGex() {
       // success signal. Without this check the badge was left stuck on
       // "Loading…" and renderGex(d) would run against a response with no
       // `series`, rendering blank/broken charts with no visible error.
-      badge.textContent = 'error: ' + (d.error || 'unknown');
-      badge.style.color = '#e8423a';
+      _setGexBadges('error: ' + (d.error || 'unknown'), '#e8423a');
       return;
     }
     if (d.source === 'rest') {
-      badge.textContent = '⚡ live REST fetch';
-      badge.style.color = '#f5a623';
+      _setGexBadges('⚡ live REST fetch', '#f5a623');
     } else if (d.source === 'stream_cache') {
-      badge.textContent = '● stream cache';
-      badge.style.color = '#00c896';
+      _setGexBadges('● stream cache', '#00c896');
     } else {
-      badge.textContent = '';
+      _setGexBadges('');
     }
     renderGex(d);
-  } catch(_) { badge.textContent = 'error'; }
+  } catch(_) { _setGexBadges('error', '#e8423a'); }
 }
 
 // GEX sub-tabs
@@ -1979,13 +2002,32 @@ document.querySelectorAll('.gex-tab').forEach(tab => {
     document.querySelectorAll('.gex-tab-panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active');
     document.getElementById('gex-panel-' + tab.dataset.gexTab).classList.add('active');
+    // A viewport-fit computed while this panel was display:none (hidden elements report a
+    // zero-valued bounding rect) would be wrong — recompute now that it's visible again,
+    // before resize() picks up the container's current (now-correct) height.
+    if (tab.dataset.gexTab === 'gex' && gexData) {
+      _fitChartToViewport('gex-main-chart', 24, 220);
+    }
     // resize charts that were rendered while their panel was hidden
     [gexMainChart, gexIvChart, gexOiChart, gexVolChart].forEach(c => { if (c) c.resize(); });
   });
 });
 
+// Keep the gamma-exposure chart fit to the viewport across window resizes.
+window.addEventListener('resize', () => {
+  if (!gexMainChart) return;
+  _fitChartToViewport('gex-main-chart', 24, 220);
+  gexMainChart.resize();
+});
+
 // Symbol selector
-document.getElementById('gex-symbol-select').addEventListener('change', fetchGex);
+document.querySelectorAll('.gex-symbol-select').forEach(sel => {
+  sel.addEventListener('change', () => {
+    const sym = sel.value;
+    document.querySelectorAll('.gex-symbol-select').forEach(other => { other.value = sym; });
+    fetchGex();
+  });
+});
 
 // GEX radio toggle listeners
 document.querySelectorAll('input[name="gex_view"]').forEach(el =>

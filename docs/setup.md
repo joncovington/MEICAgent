@@ -44,7 +44,7 @@ Key fields to update in `config.json`:
 
 | Field | Description |
 |---|---|
-| `symbol` | Underlying to trade. Equity: `XSP`, `SPX`, `NDX`, `RUT`. Futures: `/MES`, `/ES`, `/MNQ`, `/NQ` |
+| `symbols` | List of underlyings to trade concurrently, e.g. `["XSP", "SPX"]` — any index or equity symbols tastytrade supports, such as equity index options (`XSP`, `SPX`, `NDX`, `RUT`) or futures options (`/MES`, `/ES`, `/MNQ`, `/NQ`). Every symbol must list daily-expiring (0DTE) option chains; most single-name equities don't. Non-cash-settled symbols should be left out of `cash_settled_symbols` so a missed force-close is escalated as an assignment-risk failure. All symbols share one account-wide risk budget (buying power, `max_concurrent_ics`, `max_entries_per_day`) — there's no per-symbol cap, and correlated symbols aren't exposure-limited against each other yet. The single-symbol `symbol` key is still accepted as a deprecated alias for `["symbol"]` if `symbols` is omitted. |
 | `delta_target` | Short strike delta target (default `0.18`) |
 | `max_wing_width` | Upper bound (points) on spread width; the agent decides the actual wing width per entry rather than picking from a fixed list |
 | `quantity` | Number of contracts per IC leg |
@@ -65,35 +65,24 @@ python src/db.py init_db
 
 This creates `data/meic_trades.db` (SQLite, WAL mode). Safe to run multiple times.
 
-### 6. Configure the MCP server
+### 6. Enable live trading (when ready)
 
-The tastytrade MCP server is defined in `.mcp.json` at the project root and enabled via `.claude/settings.local.json`. By default live trading is disabled and a buying-power buffer is applied:
+Tastytrade operations go direct via the Python SDK in `tt.py` — there is no MCP server involved (`.mcp.json` at the project root only configures the unrelated `agentmemory` server, if you've set that up). Live order submission is gated by a single `config.json` key, checked by `tt.py`'s `_live_trading_enabled()` before any `execute_trade`/`adjust_order`/`close_position` call:
 
 ```json
 {
-  "ENABLE_LIVE_TRADING": "false",
-  "FORCE_DRY_RUN": "true",
-  "BUYING_POWER_BUFFER_PCT": "25",
-  "ACCOUNT_DEPLOY_LIMIT_PCT": "80"
+  "enable_live_trading": false
 }
 ```
 
-These environment variables are read by the `tastytrade-mcp` process at startup. To go live, set `ENABLE_LIVE_TRADING` to `"true"` and remove `FORCE_DRY_RUN` (or set it to `"false"`) in `.mcp.json`, then restart the Claude Code session so the MCP server picks up the new env.
+By default this is `false`, so `execute_trade`/`adjust_order` calls without `--live` always dry-run regardless of this setting, and calls with `--live` are rejected outright. To go live, set `enable_live_trading` to `true` in `config.json` — no restart of the Claude Code session is required, since `tt.py` reads `config.json` fresh on every invocation.
 
 ---
 
 ## Running the tests
 
-The test suite uses `MockMCP` — a plain Python stub that returns realistic response dicts. No tastytrade connection or credentials required.
+The test suite operates on temp SQLite databases and stubbed cache data — no tastytrade connection or credentials required.
 
 ```bash
 pytest
 ```
-
-For a human-readable end-to-end report:
-
-```bash
-python tests/test_mock_run.py
-```
-
-Three scenarios are covered: `midday_normal` (3 open ICs, all stops working), `stop_filled` (one stop order disappears — IC stopped out), and `bp_rejected` (dry-run pre-flight returns buying-power rejection).

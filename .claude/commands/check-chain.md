@@ -1,8 +1,8 @@
-Verify that the tastytrade MCP option chain and delta-based strike selection are working for the relevant trading session. Tests today's expiration if before 16:00 ET on a trading day; otherwise tests the next trading day.
+Verify that the tastytrade MCP option chain and delta-based strike selection are working for the relevant trading session, **for every symbol in `config.json`'s `symbols` list**. Tests today's expiration if before 16:00 ET on a trading day; otherwise tests the next trading day. Repeat Steps 2–4 below once per symbol; report one row per symbol in the final table plus an overall verdict.
 
 ---
 
-## Step 1: Determine target expiration
+## Step 1: Determine target expiration and symbol list
 
 ```bash
 python -c "
@@ -28,11 +28,12 @@ else:
     reason = 'next trading day (market closed or after 16:00 ET)'
 dte = (target - today).days
 test_width = max(1, cfg['max_wing_width'] // 2)
-print(json.dumps({'now_et': now.strftime('%H:%M %Z'), 'target_date': str(target), 'dte': dte, 'reason': reason, 'symbol': cfg['symbol'], 'delta_target': cfg['delta_target'], 'test_wing_width': test_width}))
+symbols = cfg.get('symbols') or ([cfg['symbol']] if cfg.get('symbol') else ['XSP'])
+print(json.dumps({'now_et': now.strftime('%H:%M %Z'), 'target_date': str(target), 'dte': dte, 'reason': reason, 'symbols': symbols, 'delta_target': cfg['delta_target'], 'test_wing_width': test_width}))
 "
 ```
 
-Record: `target_date`, `dte`, `symbol`, `delta_target`, `test_wing_width`, `reason`.
+Record: `target_date`, `dte`, `symbols` (the full list to test), `delta_target`, `test_wing_width`, `reason`. Run Steps 2–4 once for each entry in `symbols`.
 
 ---
 
@@ -96,9 +97,9 @@ Extract:
 
 ### Output
 
-Present as a two-section table followed by a verdict:
+Present as a two-section table **per symbol** (repeat both tables for each entry in `symbols`), followed by one overall verdict covering every symbol tested:
 
-**Chain health**
+**Chain health — `<SYMBOL>`**
 | Check | Result | Notes |
 |---|---|---|
 | Request ok | ✓ / ✗ | |
@@ -106,7 +107,7 @@ Present as a two-section table followed by a verdict:
 | quotes_complete | ✓ / ✗ | N strikes |
 | around_price used | ✓ / — | last price or median fallback |
 
-**Strike selection**
+**Strike selection — `<SYMBOL>`**
 | Check | Result | Notes |
 |---|---|---|
 | Request ok | ✓ / ✗ | |
@@ -116,7 +117,8 @@ Present as a two-section table followed by a verdict:
 | Short call delta | ~0.XX | pass if within ±0.05 of target |
 | net_credit | $X.XX | null/0 = after-hours expiry (expected) |
 
-End with a one-line verdict:
+End with a one-line verdict per symbol, then an overall summary:
 
-- **PASS** — all checks green; chain and strike selection are ready for the next session.
-- **NEEDS ATTENTION** — flag the specific failing check(s) and what to investigate.
+- **PASS** — all checks green for this symbol; chain and strike selection are ready for the next session.
+- **NEEDS ATTENTION** — flag the specific failing check(s) and what to investigate for this symbol.
+- **Overall**: PASS only if every symbol in `symbols` passed; otherwise list which symbol(s) need attention.

@@ -1,13 +1,13 @@
 {
   "instrument_and_sizing_header": "===== Instrument & Sizing =====",
-  "symbol": "SPX",
-  "gex_symbol": "SPX",
-  "_gex_symbol_note": "Underlying for the GEX dashboard channel. Set equal to symbol to disable the separate GEX streaming window.",
+  "symbols": ["SPX"],
+  "_symbols_note": "List of underlyings to trade concurrently, e.g. [\"SPX\", \"XSP\"]. Each symbol gets its own live ATM subscription window and its own GEX channel (net_gex/gamma_flip/call_wall/put_wall computed from that symbol's own OI+greeks) — there is no longer a separate gex_symbol; GEX is 1:1 with every traded symbol. The single-symbol 'symbol' key is still accepted as a deprecated alias for [\"symbol\"] if 'symbols' is absent, but new configs should use 'symbols'. max_concurrent_ics and max_entries_per_day are account-wide totals shared across every symbol in this list, not per-symbol caps. Correlated symbols (e.g. SPX and XSP) are not currently exposure-limited against each other — avoid combinations that double up on the same directional risk until that guard exists.",
   "delta_target": 0.18,
   "max_wing_width": 10,
   "_max_wing_width_note": "Upper bound (points) on spread width; the agent chooses the actual wing width per entry (any reasonable value up to this max) based on credit, buying power, and session conditions rather than scanning a fixed list.",
   "quantity": 1,
   "cash_settled_symbols": ["SPX", "XSP", "NDX", "RUT"],
+  "_cash_settled_symbols_note": "Symbols that settle in cash at expiration. All positions are force-closed at force_close_time regardless of membership here — this list only controls whether a missed force-close is escalated as a critical assignment-risk failure (symbol not listed) or routine cash-settlement remediation (symbol listed). Leave any equity or physically-settled symbol you add to 'symbols' out of this list.",
 
   "trading_window_and_caps_header": "===== Trading Window & Daily Caps =====",
   "enable_live_trading": false,

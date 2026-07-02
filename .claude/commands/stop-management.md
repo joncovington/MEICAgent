@@ -1,4 +1,4 @@
-Run the MEICAgent stop management step. Executes every loop iteration for all open trades.
+Run the MEICAgent stop management step. Executes every loop iteration for all open trades **across every configured symbol in one pass** (not scoped to one symbol) — each trade record already carries its own `symbol`, so every rule below that references "the symbol" means that specific trade's symbol, not a single configured default.
 
 Requires: open trades list and current market data (underlying price, option chain) already gathered this iteration.
 
@@ -59,7 +59,7 @@ python src/db.py record_stop_adjustment --ic_order_id "<id>" --new_trigger <val>
    - **FOMC blackout** (today in `fomc_dates_2026`, current time ≥ `fomc_blackout_start` = 13:30 ET): close all open ICs immediately before the announcement window.
    - **Triple witching / quarterly expiry force-close** (today in `triple_witching_dates_2026` or `quarterly_expiry_dates_2026`, current time ≥ 14:00 ET): close all open ICs.
    - **General force-close** (current time ≥ `force_close_time` = 15:45 ET): close all remaining open ICs regardless of P&L.
-   - Mark as `expired` only if the position is flat and the symbol is in `cash_settled_symbols` (no exchange close needed — cash settlement handles it, but only if fully OTM).
+   - Mark as `expired` only if the position is flat and that trade's own `symbol` is in `cash_settled_symbols` (no exchange close needed — cash settlement handles it, but only if fully OTM). If the trade's symbol is not in `cash_settled_symbols`, it must be closed, never left to expire — see the assignment-risk escalation in Step 2 of the main loop.
    - For any side not already recorded via `record_leg_exit` this trade (i.e. still `open`), record it now with `--status expired|force_closed` matching the outcome, plus `--exit_time`, `--exit_reason`, `--exit_price`, and `--pnl` for that leg.
 
 8. **Re-evaluate partial and post-stop positions** — apply the same close / buy-back-short / hold framework to any `partial` status IC on every iteration. When the remaining side finally closes (expires OTM or gets stopped), record its leg via `record_leg_exit` — the other side's row was already written when it stopped in step 5.

@@ -4,7 +4,7 @@ An AI-driven Multiple Entry Iron Condor (MEIC) strategy trading agent for 0DTE o
 
 The agent runs as a Claude Code `/loop` — on each iteration (~every 5 minutes during market hours) it reads persisted state, assesses market conditions, makes AI-driven entry and stop decisions, executes trades, and logs a plain English account of everything it did and why.
 
-Supports **equity index options** (XSP, SPX, NDX, RUT) and **CME futures options** (/MES, /ES, /MNQ, /NQ). All contract-specific parameters (`instrument_type`, `dollar_multiplier`, leg symbols) are read directly from the `get_strategies` response — no hardcoding required when switching underlyings.
+Trades **any combination of index or equity symbols** concurrently, configured via `symbols` (a list) in `config.json`, including equity index options (XSP, SPX, NDX, RUT) and CME futures options (/MES, /ES, /MNQ, /NQ). Each symbol gets its own live option window, its own GEX profile, and independent entry/stop decisions each loop iteration — while sharing one account-wide risk budget (`max_concurrent_ics`, `max_entries_per_day`, buying power) across all of them. All contract-specific parameters (`instrument_type`, `dollar_multiplier`, leg symbols) are read directly from the `get_strategies` response — no hardcoding required when adding a symbol. Every symbol must list daily-expiring (0DTE) option chains; the agent hard-stops any entry where the fetched chain's nearest expiration isn't today. Symbols that don't settle in cash at expiration (most equities) should be left out of `cash_settled_symbols` so a missed force-close is escalated as an assignment-risk failure rather than routine cleanup. **Correlation risk across symbols is not yet guarded** — avoid configuring highly correlated symbols (e.g. SPX and XSP) together until that safeguard exists.
 
 
 ---
@@ -60,7 +60,6 @@ MEICAgent/
 │       ├── eod-report.md            # /eod-report skill
 │       ├── meic-status.md           # /meic-status skill
 │       ├── check-chain.md           # /check-chain skill — verify chain and strike selection
-│       ├── test-mcp.md              # /test-mcp skill
 ├── data/                            # Created at first run (gitignored)
 │   └── meic_trades.db
 └── logs/                            # Created at first run (gitignored)

@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS loop_log (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     loop_time        TEXT NOT NULL,
     loop_date        TEXT NOT NULL,
+    symbol           TEXT,
     action           TEXT,
     reasoning        TEXT,
     open_trades_n    INTEGER DEFAULT 0,
@@ -181,6 +182,10 @@ def cmd_init_db(_args):
     for col, col_type in [("closing_nlv", "REAL"), ("session_init_at", "TEXT")]:
         if col not in existing_ds:
             conn.execute(f"ALTER TABLE daily_summary ADD COLUMN {col} {col_type}")
+    existing_ll = {row[1] for row in conn.execute("PRAGMA table_info(loop_log)")}
+    if "symbol" not in existing_ll:
+        conn.execute("ALTER TABLE loop_log ADD COLUMN symbol TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_loop_log_symbol_date ON loop_log(symbol, loop_date)")
     conn.commit()
     conn.close()
     _out({"ok": True, "message": "Database initialized"})
@@ -190,35 +195,44 @@ def cmd_init_db(_args):
 # Read commands
 # ---------------------------------------------------------------------------
 
-def cmd_get_open_trades(_args):
+def cmd_get_open_trades(args):
     today = _today_et()
+    symbol = getattr(args, "symbol", None)
     conn = _connect()
-    rows = conn.execute(
-        "SELECT * FROM ic_trades WHERE status IN ('pending','open','partial','partial_entry') AND trade_date = ?",
-        (today,)
-    ).fetchall()
+    sql = "SELECT * FROM ic_trades WHERE status IN ('pending','open','partial','partial_entry') AND trade_date = ?"
+    params: list = [today]
+    if symbol:
+        sql += " AND symbol = ?"
+        params.append(symbol.upper())
+    rows = conn.execute(sql, params).fetchall()
     conn.close()
     _out({"ok": True, "open_trades": [dict(r) for r in rows]})
 
 
-def cmd_get_today_count(_args):
+def cmd_get_today_count(args):
     today = _today_et()
+    symbol = getattr(args, "symbol", None)
     conn = _connect()
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM ic_trades WHERE trade_date = ? AND status != 'cancelled'",
-        (today,)
-    ).fetchone()
+    sql = "SELECT COUNT(*) AS n FROM ic_trades WHERE trade_date = ? AND status != 'cancelled'"
+    params: list = [today]
+    if symbol:
+        sql += " AND symbol = ?"
+        params.append(symbol.upper())
+    row = conn.execute(sql, params).fetchone()
     conn.close()
     _out({"ok": True, "today_count": row["n"]})
 
 
-def cmd_get_today_pnl(_args):
+def cmd_get_today_pnl(args):
     today = _today_et()
+    symbol = getattr(args, "symbol", None)
     conn = _connect()
-    row = conn.execute(
-        "SELECT COALESCE(SUM(pnl), 0) AS total FROM ic_trades WHERE trade_date = ?",
-        (today,)
-    ).fetchone()
+    sql = "SELECT COALESCE(SUM(pnl), 0) AS total FROM ic_trades WHERE trade_date = ?"
+    params: list = [today]
+    if symbol:
+        sql += " AND symbol = ?"
+        params.append(symbol.upper())
+    row = conn.execute(sql, params).fetchone()
     conn.close()
     _out({"ok": True, "today_pnl": round(float(row["total"]), 2)})
 
@@ -476,13 +490,13 @@ def cmd_log_loop_action(args):
     conn = _connect()
     conn.execute(
         """INSERT INTO loop_log
-           (loop_time, loop_date, action, reasoning,
+           (loop_time, loop_date, symbol, action, reasoning,
             open_trades_n, today_count, today_pnl,
             iv_rank, underlying_price, session_quality,
             mcp_errors, duration_ms, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            now_str, today,
+            now_str, today, args.symbol,
             args.action, args.reasoning,
             ctx.get("open_trades", 0),
             ctx.get("today_count", 0),
@@ -558,9 +572,12 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("init_db")
-    sub.add_parser("get_open_trades")
-    sub.add_parser("get_today_count")
-    sub.add_parser("get_today_pnl")
+    p_open = sub.add_parser("get_open_trades")
+    p_open.add_argument("--symbol", default=None, help="Filter to one symbol; omit for all symbols")
+    p_cnt = sub.add_parser("get_today_count")
+    p_cnt.add_argument("--symbol", default=None, help="Filter to one symbol; omit for all symbols")
+    p_pnl = sub.add_parser("get_today_pnl")
+    p_pnl.add_argument("--symbol", default=None, help="Filter to one symbol; omit for all symbols")
     sub.add_parser("get_eod_summary")
     sub.add_parser("get_session_init")
     sub.add_parser("set_session_init")
@@ -605,6 +622,8 @@ def main():
     p_dsum.add_argument("--closing_nlv", default=None, type=float)
 
     p_log = sub.add_parser("log_loop_action")
+    p_log.add_argument("--symbol", default=None,
+                        help="Symbol this log row is for; omit for an iteration-level summary row spanning all symbols")
     p_log.add_argument("--action", required=True)
     p_log.add_argument("--reasoning", default="")
     p_log.add_argument("--market_context", default="{}")

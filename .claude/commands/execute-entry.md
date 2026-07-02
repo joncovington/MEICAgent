@@ -2,7 +2,7 @@ Execute a new MEICAgent iron condor entry. Only invoke when the entry decision (
 
 Requires: strategy strikes, wing width, and quotes already evaluated this iteration.
 
-1. **Strike overlap check** — fetch open trades and collect all strikes currently held across all open ICs. Confirm that none of the four proposed strikes (short put, long put, short call, long call) appears in that set. A matching strike would either net out an existing leg (partial close) or result in more than one contract at the same strike — both are disallowed. If any overlap is found, abort immediately without submitting an order.
+1. **Strike overlap check** — fetch open trades for **this symbol only** (`python src/db.py get_open_trades --symbol <symbol>`) and collect all strikes currently held across this symbol's open ICs. Confirm that none of the four proposed strikes (short put, long put, short call, long call) appears in that set. A matching strike would either net out an existing leg (partial close) or result in more than one contract at the same strike — both are disallowed. Strikes on other symbols are never compared (they're on different underlyings and different price scales). If any overlap is found, abort immediately without submitting an order.
 
 2. **Price check** — get the current underlying price:
 ```bash
@@ -74,7 +74,7 @@ Do not widen the limit to compensate — abort cleanly. Log the abort reason. Th
 6. **Submit the order** — add `--live` to submit the real order. Based on `separate_spread_entry` config:
    - `false`: one 4-leg combo order.
    - `true`: two separate 2-leg spread orders (dry run each before submitting each).
-   - `auto`: use separate spreads if IV rank > 0.35, session is late or open_volatile, or 2+ ICs already open; otherwise use combo.
+   - `auto`: use separate spreads if IV rank > 0.35, session is late or open_volatile, or 2+ ICs already open account-wide (across every symbol, not just this one); otherwise use combo.
 
 7. **Save the trade** — record the new IC in the database:
 ```bash

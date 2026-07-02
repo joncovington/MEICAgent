@@ -115,9 +115,7 @@ After 15:00 ET, the agent reviews each open spread for unacceptable gamma risk a
 - Short-strike gamma is above 0.10
 - The spread value is accelerating faster than stops can track
 
-**Cash-settled symbols** (SPX, XSP, NDX, RUT) — remaining open positions can be left to expire; cash settlement delivers intrinsic value automatically with no assignment risk.
-
-**Non-cash-settled symbols** (including futures options: /MES, /ES, /NQ, /MNQ) — all remaining open legs are closed before 15:45 ET.
+All remaining open legs are force-closed before 15:45 ET regardless of symbol — the agent never intentionally holds a position to expiration. What differs by symbol is how a *missed* force-close is handled: for cash-settled symbols (default: SPX, XSP, NDX, RUT — configurable via `cash_settled_symbols`), a miss still settles in cash automatically, so it's routine remediation. For non-cash-settled symbols (individual equities, and futures options like /MES, /ES, /NQ, /MNQ), a miss risks physical assignment and is escalated as a critical failure with an immediate marketable-limit retry.
 
 ---
 
@@ -132,7 +130,7 @@ The agent supports futures options on CME equity index contracts:
 | /MNQ | Micro E-mini NASDAQ-100 | $2/pt | 10 pts |
 | /NQ | E-mini NASDAQ-100 | $20/pt | 10 pts |
 
-When `config.symbol` starts with `/`, the agent calls `get_quote` (not `get_market_overview`) to obtain the underlying price. IV rank is unavailable for futures — the agent treats it as neutral (0.5) and relies on premium quality and delta targeting. All four legs carry `instrument_type: "Future Option"` from the `get_strategies` response; stop orders use the same `instrument_type` so no hardcoding is needed.
+When the symbol being processed in the per-symbol loop starts with `/`, the agent calls `get_quote` (not `get_market_overview`) to obtain the underlying price for that symbol. IV rank is unavailable for futures — the agent treats it as neutral (0.5) for that symbol and relies on premium quality and delta targeting. All four legs carry `instrument_type: "Future Option"` from the `get_strategies` response; stop orders use the same `instrument_type` so no hardcoding is needed. A `symbols` list can freely mix futures and index/equity symbols — this check applies per symbol, independently.
 
 `dollar_multiplier` is returned by `get_strategies` and is used for:
 - **Buying power check**: `wing_width × dollar_multiplier` = max loss per spread

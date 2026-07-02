@@ -393,3 +393,94 @@ def test_build_api_data_today_merges_into_week(db_path):
     assert result["stats"]["today"]["total_trades"] == 1
 
 
+
+
+# ── _load_symbols / _load_symbol ─────────────────────────────────────────────
+
+def _write_config(monkeypatch, tmp_path, cfg):
+    path = str(tmp_path / "config.json")
+    with open(path, "w") as f:
+        json.dump(cfg, f)
+    monkeypatch.setattr(dashboard, "_CONFIG_PATH", path)
+
+
+def test_load_symbols_list(monkeypatch, tmp_path):
+    _write_config(monkeypatch, tmp_path, {"symbols": ["xsp", "spx"]})
+    assert dashboard._load_symbols() == ["XSP", "SPX"]
+    assert dashboard._load_symbol() == "XSP"
+
+def test_load_symbols_deprecated_singular_alias(monkeypatch, tmp_path):
+    _write_config(monkeypatch, tmp_path, {"symbol": "xsp"})
+    assert dashboard._load_symbols() == ["XSP"]
+
+def test_load_symbols_default_when_missing(monkeypatch, tmp_path):
+    _write_config(monkeypatch, tmp_path, {})
+    assert dashboard._load_symbols() == ["XSP"]
+
+def test_load_symbols_missing_config_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(dashboard, "_CONFIG_PATH", str(tmp_path / "nonexistent.json"))
+    assert dashboard._load_symbols() == ["XSP"]
+
+
+# ── _build_api_data symbol filtering ─────────────────────────────────────────
+
+def test_build_api_data_reports_configured_symbols(db_path, monkeypatch, tmp_path):
+    _write_config(monkeypatch, tmp_path, {"symbols": ["XSP", "SPX"]})
+    result = dashboard._build_api_data()
+    assert result["symbols"] == ["XSP", "SPX"]
+    assert result["selected_symbol"] == "ALL"
+
+def test_build_api_data_no_filter_includes_all_symbols(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-X", symbol="XSP", pnl=1.00, status="expired")
+    _insert_trade(conn, ic_order_id="IC-S", symbol="SPX", pnl=3.00, status="expired")
+    conn.close()
+    result = dashboard._build_api_data()
+    assert len(result["trades"]) == 2
+    assert abs(result["stats"]["today"]["net_pnl"] - 4.00) < 0.01
+
+def test_build_api_data_filtered_by_symbol(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-X", symbol="XSP", pnl=1.00, status="expired")
+    _insert_trade(conn, ic_order_id="IC-S", symbol="SPX", pnl=3.00, status="expired")
+    conn.close()
+    result = dashboard._build_api_data("XSP")
+    assert result["selected_symbol"] == "XSP"
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["symbol"] == "XSP"
+    assert abs(result["stats"]["today"]["net_pnl"] - 1.00) < 0.01
+
+def test_build_api_data_symbol_filter_case_insensitive(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-X", symbol="XSP", pnl=1.00, status="expired")
+    conn.close()
+    result = dashboard._build_api_data("xsp")
+    assert len(result["trades"]) == 1
+
+def test_build_api_data_all_keyword_is_unfiltered(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-X", symbol="XSP", pnl=1.00, status="expired")
+    _insert_trade(conn, ic_order_id="IC-S", symbol="SPX", pnl=3.00, status="expired")
+    conn.close()
+    result = dashboard._build_api_data("ALL")
+    assert len(result["trades"]) == 2
+
+def test_build_api_data_symbol_filter_applies_to_recent_trades(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-X", symbol="XSP", pnl=1.00, status="expired")
+    _insert_trade(conn, ic_order_id="IC-S", symbol="SPX", pnl=3.00, status="expired")
+    conn.close()
+    result = dashboard._build_api_data("SPX")
+    recent = result["analytics"]["recent_trades"]
+    assert len(recent) == 1
+    assert recent[0]["symbol"] == "SPX"
+
+def test_build_api_data_symbol_filter_applies_to_fee_summary(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-X", symbol="XSP", net_credit=0.50, fees=0.10, pnl=1.00, status="expired")
+    _insert_trade(conn, ic_order_id="IC-S", symbol="SPX", net_credit=1.50, fees=0.30, pnl=3.00, status="expired")
+    conn.close()
+    xsp_result = dashboard._build_api_data("XSP")
+    spx_result = dashboard._build_api_data("SPX")
+    assert xsp_result["analytics"]["fee_summary"]["gross_credit"] == 0.50
+    assert spx_result["analytics"]["fee_summary"]["gross_credit"] == 1.50

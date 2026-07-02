@@ -1,12 +1,17 @@
 """MEICAgent DXLink Streamer Daemon.
 
-Maintains a persistent WebSocket to tastytrade's DXLink feed and writes
-the latest Quote, Greeks, and Trade events to data/stream_cache.db.
+Maintains a single persistent WebSocket to tastytrade's DXLink feed and writes
+the latest Quote, Greeks, and Trade events to data/stream_cache.db, for every
+symbol configured in config.json's `symbols` list. Each traded symbol gets its
+own subscription window (near-the-money option strikes) on the same connection —
+that window doubles as both the entry-strike-selection data and that symbol's
+own GEX profile, so GEX is computed per-symbol automatically.
 
 Usage:
-  python src/streamer.py           # start daemon (foreground)
-  python src/streamer.py --stop    # send SIGTERM to running daemon
-  python src/streamer.py --status  # print cache status and exit
+  python src/streamer.py                       # start daemon (foreground), symbols from config.json
+  python src/streamer.py --symbol XSP --symbol SPX  # override traded symbols for this run
+  python src/streamer.py --stop                # send SIGTERM to running daemon
+  python src/streamer.py --status               # print cache status and exit
 
 The main loop in tt.py reads from the cache (age < 10s) before falling
 back to a fresh DXLink connection. The dashboard reads it for live P&L.
@@ -219,17 +224,17 @@ def _open_trade_streamer_symbols() -> list[str]:
         return []
 
 
-def _resolve_subscriptions(underlying: str) -> dict[str, list[str]]:
+def _resolve_subscriptions(symbols: list[str]) -> dict[str, list[str]]:
     """Return {event_type: [streamer_symbols]} for current open positions."""
     option_syms = _open_trade_streamer_symbols()
     return {
-        "Trade": [underlying],
+        "Trade": list(symbols),
         "Quote": option_syms,
         "Greeks": option_syms,
-        # Seed Summary with the underlying so the channel opens at startup even with no open trades.
-        # The underlying's Summary event carries OHLC/volume (not OI); option OI arrives once ATM
-        # window symbols are subscribed by _atm_refresher and _gex_refresher.
-        "Summary": [underlying] + option_syms,
+        # Seed Summary with each underlying so the channel opens at startup even with no open
+        # trades. Each underlying's Summary event carries OHLC/volume (not OI); option OI arrives
+        # once each symbol's window is subscribed by _symbol_refresher.
+        "Summary": list(symbols) + option_syms,
     }
 
 
@@ -240,16 +245,15 @@ def _resolve_subscriptions(underlying: str) -> dict[str, list[str]]:
 _RECONNECT_BASE   = 2.0
 _RECONNECT_MAX    = 60.0
 _SYMBOL_POLL_S    = 30.0    # how often to check for new open trades
-_ATM_STRIKE_COUNT = 15      # strikes each side of ATM to subscribe (~30 options × 2 types)
-_ATM_REFRESH_PTS  = 1.0     # re-center window when underlying moves this many points
 _HTTP_PORT        = 7699    # streamer API port
 
-# GEX channel — streams a wider option chain for a separate underlying (e.g. SPX)
-# Uses the same DXLink Quote/Greeks channels as the trading loop; events are stored
-# in the same cache tables keyed by streamer symbol so there is no collision.
-_GEX_STRIKE_COUNT = 20      # strikes each side of ATM for GEX (~40 strikes × 2 types = ~80 symbols)
-_GEX_REFRESH_S    = 60.0    # how often to re-center the GEX subscription window
-_GEX_REFRESH_PTS  = 2.0     # re-center when GEX underlying moves this many points
+# Per-symbol subscription window. Every traded symbol gets exactly one window sized to the
+# GEX requirement (wider than the ATM-only requirement of ~15 strikes) — GEX profile accuracy
+# needs strikes further from the money than entry strike selection does, and a single window
+# per symbol comfortably covers both needs rather than maintaining two separate windows.
+_WINDOW_STRIKE_COUNT = 20   # strikes each side of center (~40 strikes × 2 types = ~80 symbols)
+_WINDOW_REFRESH_PTS  = 1.0  # re-center when the symbol's underlying moves this many points
+_WINDOW_POLL_S       = 5.0  # how often to check whether a re-center is due
 
 # Shared state for the HTTP server thread
 _loop: asyncio.AbstractEventLoop | None = None           # DXLink event loop
@@ -286,15 +290,14 @@ class _State:
         self.reconnect_count = 0
         self.last_event_at: str | None = None
         self.conn: sqlite3.Connection = _cache_connect()
-        # ATM window tracking (trading underlying, e.g. XSP)
-        self.atm_center: float | None = None
-        self.atm_syms: list[str] = []
-        self.dte0_chain: dict | None = None
-        # GEX channel tracking (separate underlying, e.g. SPX)
-        self.gex_center: float | None = None          # price the GEX window is centered on
-        self.gex_syms: list[str] = []                 # current GEX streamer symbols
-        self.gex_chain: dict | None = None            # REST chain for GEX underlying
-        self.gex_target_symbol: str | None = None     # desired GEX symbol (set via HTTP API)
+        # Per-symbol subscription window tracking. Every entry in `symbols` (the config's
+        # traded-symbol list) gets its own chain/window/center, keyed by symbol — this is what
+        # makes GEX (and entry strike selection) genuinely per-symbol rather than shared across
+        # every traded underlying via one global window.
+        self.symbols: list[str] = []
+        self.chains: dict[str, dict] = {}        # symbol -> {streamer_symbol: option}
+        self.window_syms: dict[str, list[str]] = {}   # symbol -> currently subscribed option streamer symbols
+        self.centers: dict[str, float] = {}       # symbol -> underlying price the window is centered on
         # Batched-commit bookkeeping: DXLink pushes Trade/Quote/Greeks/Summary
         # events far more often than any reader's freshness gate requires
         # (10s-2700s — see tt.py), so committing on every single event turns
@@ -318,7 +321,7 @@ def _maybe_commit(state: "_State") -> None:
         state.last_commit_at = now
 
 
-async def _run_stream(state: _State, underlying: str, gex_symbol: str | None = None) -> None:
+async def _run_stream(state: _State, symbols: list[str]) -> None:
     from tastytrade import DXLinkStreamer
     from tastytrade.dxfeed import Greeks, Quote, Summary, Trade
 
@@ -336,7 +339,7 @@ async def _run_stream(state: _State, underlying: str, gex_symbol: str | None = N
         logger.info("DXLinkStreamer connected (reconnects: %d)", state.reconnect_count)
 
         # Initial subscriptions
-        subs = _resolve_subscriptions(underlying)
+        subs = _resolve_subscriptions(symbols)
         await _apply_subscriptions(streamer, state, subs, Trade, Quote, Greeks, Summary)
 
         # Fan-out listeners + subscription updater as concurrent tasks
@@ -345,22 +348,56 @@ async def _run_stream(state: _State, underlying: str, gex_symbol: str | None = N
             tg.create_task(_listen_quote(streamer, state, Quote))
             tg.create_task(_listen_greeks(streamer, state, Greeks))
             tg.create_task(_listen_summary(streamer, state, Summary))
-            tg.create_task(_poll_subscriptions(streamer, state, underlying, Trade, Quote, Greeks, Summary))
-            tg.create_task(_atm_refresher(streamer, state, underlying, Quote, Greeks, Summary))
+            tg.create_task(_poll_subscriptions(streamer, state, symbols, Trade, Quote, Greeks, Summary))
             tg.create_task(_flush_status(state))
             tg.create_task(_watch_stop(state))
-            # GEX channel: stream a separate wider chain for dashboard GEX analysis
-            if gex_symbol and gex_symbol.upper() != underlying.upper():
-                tg.create_task(_gex_refresher(streamer, state, gex_symbol.upper(), Quote, Greeks, Summary))
+            # One subscription-window refresher per traded symbol — each maintains its own
+            # near-the-money option window (used for both entry strike selection and that
+            # symbol's own GEX profile).
+            for sym in symbols:
+                tg.create_task(_symbol_refresher(streamer, state, sym, Quote, Greeks, Summary))
+
+
+def _total_subscribed(state: _State) -> int:
+    """Combined subscription count across both tracking structures: state.subscribed
+    (Trade + open-IC-leg Quote/Greeks/Summary, maintained by _apply_subscriptions) and
+    state.window_syms (each traded symbol's own ATM/GEX window, maintained by
+    _symbol_refresher). These are two independent sets of real streamer.subscribe() calls
+    that can overlap (an open leg may also fall inside a symbol's window) — union rather
+    than sum them so the reported total doesn't double-count. Both writers call this same
+    helper so the reported total never regresses when the other writer's periodic update
+    fires (previously each computed its own partial total, and _apply_subscriptions's
+    unconditional 30s poll would stomp _symbol_refresher's larger total back down)."""
+    window_union: set[str] = set()
+    for syms in state.window_syms.values():
+        window_union.update(syms)
+    total = len(state.subscribed.get("Trade", []))
+    for key in ("Quote", "Greeks", "Summary"):
+        total += len(set(state.subscribed.get(key, [])) | window_union)
+    return total
 
 
 async def _apply_subscriptions(streamer, state: _State, subs: dict, Trade, Quote, Greeks, Summary) -> None:
     cls_map = {"Trade": Trade, "Quote": Quote, "Greeks": Greeks, "Summary": Summary}
+    # A strike can be both an open-IC leg (tracked here via state.subscribed) and inside a
+    # symbol's live ATM/GEX window (tracked independently in state.window_syms by
+    # _symbol_refresher) — very plausible since windows span 20 strikes each side of the
+    # money. If the leg closes, this function alone would unsubscribe it, silently killing
+    # the window's still-wanted feed for that strike (there's no reference counting on the
+    # underlying DXLink subscription — unsubscribe removes it outright, and
+    # _symbol_refresher only resubscribes when its computed window changes, which may not
+    # happen for a while after the strike goes dark). Protect anything currently claimed by
+    # any window from removal here.
+    window_union: set[str] = set()
+    for syms in state.window_syms.values():
+        window_union.update(syms)
     for key, symbols in subs.items():
         current = set(state.subscribed.get(key, []))
         wanted  = set(symbols)
         add     = wanted - current
         remove  = current - wanted
+        if key in ("Quote", "Greeks", "Summary"):
+            remove -= window_union
         cls = cls_map[key]
         if add:
             await streamer.subscribe(cls, list(add))
@@ -369,8 +406,7 @@ async def _apply_subscriptions(streamer, state: _State, subs: dict, Trade, Quote
             await streamer.unsubscribe(cls, list(remove))
             logger.info("Unsubscribed %s %s", key, list(remove))
         state.subscribed[key] = list(wanted)
-    total = sum(len(v) for v in state.subscribed.values())
-    _upsert_status(state.conn, subscribed_symbols=total)
+    _upsert_status(state.conn, subscribed_symbols=_total_subscribed(state))
 
 
 async def _listen_trade(streamer, state: _State, Trade) -> None:
@@ -469,14 +505,14 @@ async def _listen_summary(streamer, state: _State, Summary) -> None:
             logger.warning("Summary write error: %s", exc)
 
 
-async def _poll_subscriptions(streamer, state: _State, underlying: str, Trade, Quote, Greeks, Summary) -> None:
+async def _poll_subscriptions(streamer, state: _State, symbols: list[str], Trade, Quote, Greeks, Summary) -> None:
     """Periodically refresh subscriptions to pick up newly entered ICs."""
     while not state.stop_event.is_set():
         await asyncio.sleep(_SYMBOL_POLL_S)
         if state.stop_event.is_set():
             break
         try:
-            subs = _resolve_subscriptions(underlying)
+            subs = _resolve_subscriptions(symbols)
             await _apply_subscriptions(streamer, state, subs, Trade, Quote, Greeks, Summary)
             if state.last_event_at:
                 _upsert_status(state.conn, last_event_at=state.last_event_at)
@@ -543,31 +579,42 @@ def _atm_window_syms(option_map: dict, center: float, strike_count: int) -> list
     return [sym for sym, o in option_map.items() if float(o.strike_price) in keep]
 
 
-async def _atm_refresher(streamer, state: _State, underlying: str, Quote, Greeks, Summary) -> None:
-    """Fetch the 0DTE chain at startup and keep the ATM window subscription current."""
-    # Fetch chain structure once; REST call is fast (~0.5s) and the chain doesn't change intraday
-    logger.info("Fetching 0DTE option chain for ATM window…")
+async def _symbol_refresher(streamer, state: _State, symbol: str, Quote, Greeks, Summary) -> None:
+    """Fetch symbol's 0DTE chain at startup and keep its subscription window current.
+
+    One instance runs per traded symbol (see _run_stream). Each maintains its own chain,
+    window, and center in state.chains/window_syms/centers keyed by symbol — windows for
+    different symbols never collide since option streamer symbols are namespaced per
+    underlying (e.g. .XSP... vs .SPX...). The window is sized to the wider GEX requirement
+    (_WINDOW_STRIKE_COUNT) so the same subscription serves both entry strike selection and
+    that symbol's own GEX profile — no separate narrower "trading-only" window needed.
+    """
+    logger.info("[%s] Fetching 0DTE option chain…", symbol)
     try:
-        state.dte0_chain = await _fetch_dte0_chain(underlying)
-        logger.info("0DTE chain loaded: %d options", len(state.dte0_chain))
-        _write_chain_to_cache(state.conn, state.dte0_chain)
+        chain = await _fetch_dte0_chain(symbol)
+        state.chains[symbol] = chain
+        logger.info("[%s] 0DTE chain loaded: %d options", symbol, len(chain))
+        _write_chain_to_cache(state.conn, chain)
     except Exception as exc:
-        logger.warning("Failed to fetch 0DTE chain: %s — ATM window disabled", exc)
+        logger.warning("[%s] Failed to fetch 0DTE chain: %s — window disabled", symbol, exc)
         return
 
+    state.window_syms.setdefault(symbol, [])
+
     while not state.stop_event.is_set():
-        price = _current_underlying_price(state, underlying)
+        price = _current_underlying_price(state, symbol)
 
         if price is None:
             # Underlying price not yet available — wait for first Trade event
             await asyncio.sleep(1)
             continue
 
-        # Re-center if this is the first time or underlying has moved enough
-        if state.atm_center is None or abs(price - state.atm_center) >= _ATM_REFRESH_PTS:
-            new_syms = _atm_window_syms(state.dte0_chain, price, _ATM_STRIKE_COUNT)
-            if new_syms != state.atm_syms:
-                old_set = set(state.atm_syms)
+        center = state.centers.get(symbol)
+        if center is None or abs(price - center) >= _WINDOW_REFRESH_PTS:
+            new_syms = _atm_window_syms(state.chains[symbol], price, _WINDOW_STRIKE_COUNT)
+            current_syms = state.window_syms.get(symbol, [])
+            if new_syms != current_syms:
+                old_set = set(current_syms)
                 new_set = set(new_syms)
                 add    = new_set - old_set
                 remove = old_set - new_set
@@ -584,123 +631,17 @@ async def _atm_refresher(streamer, state: _State, underlying: str, Quote, Greeks
                             await streamer.unsubscribe(Quote, list(safe_remove))
                             await streamer.unsubscribe(Greeks, list(safe_remove))
                             await streamer.unsubscribe(Summary, list(safe_remove))
-                    state.atm_syms = new_syms
-                    # Merge ATM syms into tracked subscriptions
-                    all_q = list(set(state.subscribed.get("Quote", [])) | new_set - (remove - set(_open_trade_streamer_symbols())))
-                    all_g = list(set(state.subscribed.get("Greeks", [])) | new_set - (remove - set(_open_trade_streamer_symbols())))
-                    state.subscribed["Quote"] = all_q
-                    state.subscribed["Greeks"] = all_g
-                    total = sum(len(v) for v in state.subscribed.values())
-                    _upsert_status(state.conn, subscribed_symbols=total)
+                    state.window_syms[symbol] = new_syms
+                    _upsert_status(state.conn, subscribed_symbols=_total_subscribed(state))
                     logger.info(
-                        "ATM window re-centered at %.2f (+%d/-%d symbols, total ATM: %d)",
-                        price, len(add), len(remove), len(new_syms),
+                        "[%s] window re-centered at %.2f (+%d/-%d symbols, total: %d)",
+                        symbol, price, len(add), len(remove), len(new_syms),
                     )
                 except Exception as exc:
-                    logger.warning("ATM window update error: %s", exc)
-            state.atm_center = price
+                    logger.warning("[%s] window update error: %s", symbol, exc)
+            state.centers[symbol] = price
 
-        # Check every 5 seconds — fast enough to catch 1-point moves
-        await asyncio.sleep(5)
-
-
-async def _gex_load_symbol(streamer, state: _State, symbol: str, Quote, Greeks, Summary) -> bool:
-    """Fetch chain for symbol, subscribe Trade, write cache. Returns True on success."""
-    from tastytrade.dxfeed import Trade as _Trade
-    try:
-        chain = await _fetch_dte0_chain(symbol)
-        if not chain:
-            logger.warning("GEX channel: empty chain for %s", symbol)
-            return False
-        state.gex_chain = chain
-        _write_chain_to_cache(state.conn, chain)
-        logger.info("GEX chain loaded: %d options for %s", len(chain), symbol)
-    except Exception as exc:
-        logger.warning("GEX channel: failed to fetch chain for %s: %s", symbol, exc)
-        return False
-    try:
-        await streamer.subscribe(_Trade, [symbol])
-    except Exception as exc:
-        logger.warning("GEX channel: could not subscribe Trade for %s: %s", symbol, exc)
-    return True
-
-
-async def _gex_unload_symbol(streamer, state: _State, symbol: str, Quote, Greeks, Summary) -> None:
-    """Unsubscribe all GEX symbols that aren't needed by the trading window."""
-    trading_needed = set(state.atm_syms) | set(_open_trade_streamer_symbols())
-    safe_remove = set(state.gex_syms) - trading_needed
-    if safe_remove:
-        try:
-            await streamer.unsubscribe(Quote, list(safe_remove))
-            await streamer.unsubscribe(Greeks, list(safe_remove))
-            await streamer.unsubscribe(Summary, list(safe_remove))
-        except Exception as exc:
-            logger.warning("GEX channel: unsubscribe error: %s", exc)
-    state.gex_syms = []
-    state.gex_center = None
-    state.gex_chain = None
-
-
-async def _gex_refresher(streamer, state: _State, initial_symbol: str, Quote, Greeks, Summary) -> None:
-    """Stream a wide option chain window for the GEX underlying (e.g. SPX).
-
-    Watches state.gex_target_symbol for changes driven by the dashboard symbol
-    selector. When the symbol changes, unsubscribes old options and subscribes
-    the new chain. Operates on the same DXLink Quote/Greeks channels as the
-    trading loop; events are stored keyed by streamer symbol — no collision.
-    """
-    state.gex_target_symbol = initial_symbol
-    current_symbol = initial_symbol
-
-    logger.info("GEX channel: starting with %s", current_symbol)
-    if not await _gex_load_symbol(streamer, state, current_symbol, Quote, Greeks, Summary):
-        logger.warning("GEX channel: initial load failed — will retry on next symbol change")
-
-    while not state.stop_event.is_set():
-        # Detect symbol change requested via HTTP API (set_gex_symbol command)
-        target = state.gex_target_symbol
-        if target and target != current_symbol:
-            logger.info("GEX channel: switching %s → %s", current_symbol, target)
-            await _gex_unload_symbol(streamer, state, current_symbol, Quote, Greeks, Summary)
-            if await _gex_load_symbol(streamer, state, target, Quote, Greeks, Summary):
-                current_symbol = target
-            else:
-                # Keep trying the new symbol next iteration
-                pass
-
-        if state.gex_chain:
-            price = _current_underlying_price(state, current_symbol)
-            if price is None:
-                await asyncio.sleep(2)
-                continue
-
-            if state.gex_center is None or abs(price - state.gex_center) >= _GEX_REFRESH_PTS:
-                new_syms = _atm_window_syms(state.gex_chain, price, _GEX_STRIKE_COUNT)
-                if new_syms != state.gex_syms:
-                    old_set = set(state.gex_syms)
-                    new_set = set(new_syms)
-                    add = new_set - old_set
-                    trading_needed = set(state.atm_syms) | set(_open_trade_streamer_symbols())
-                    safe_remove = (old_set - new_set) - trading_needed
-                    try:
-                        if add:
-                            await streamer.subscribe(Quote, list(add))
-                            await streamer.subscribe(Greeks, list(add))
-                            await streamer.subscribe(Summary, list(add))
-                        if safe_remove:
-                            await streamer.unsubscribe(Quote, list(safe_remove))
-                            await streamer.unsubscribe(Greeks, list(safe_remove))
-                            await streamer.unsubscribe(Summary, list(safe_remove))
-                        state.gex_syms = new_syms
-                        logger.info(
-                            "GEX window re-centered at %.2f (+%d/-%d symbols, total: %d)",
-                            price, len(add), len(safe_remove), len(new_syms),
-                        )
-                    except Exception as exc:
-                        logger.warning("GEX window update error: %s", exc)
-                state.gex_center = price
-
-        await asyncio.sleep(_GEX_REFRESH_S)
+        await asyncio.sleep(_WINDOW_POLL_S)
 
 
 async def _flush_status(state: _State) -> None:
@@ -734,16 +675,15 @@ def _f(value) -> float | None:
 # Dedicated REST event loop (separate from DXLink loop)
 # ---------------------------------------------------------------------------
 
-_REST_POLL_KEYS = [
+_REST_POLL_KEYS_STATIC = [
     ("account_info",    "get_account_info",    {"account_number": None}),
     ("positions",       "get_positions",       {"account_number": None}),
     ("working_orders",  "get_working_orders",  {"account_number": None}),
-    ("market_overview", "get_market_overview", {"symbols": ["XSP", "SPX", "VIX"], "quotes_timeout": 4.0}),
 ]
 _REST_POLL_INTERVAL = 15.0
 
 
-async def _rest_poller(conn: sqlite3.Connection) -> None:
+async def _rest_poller(conn: sqlite3.Connection, symbols: list[str]) -> None:
     """Polls REST endpoints on a fixed cadence and writes results to stream_rest_cache."""
     import tt
     fn_map = {
@@ -752,8 +692,14 @@ async def _rest_poller(conn: sqlite3.Connection) -> None:
         "get_working_orders":  tt.cmd_get_working_orders,
         "get_market_overview": tt.cmd_get_market_overview,
     }
+    # VIX is always needed for regime detection regardless of which symbols are traded.
+    overview_symbols = list(dict.fromkeys([*symbols, "VIX"]))
+    poll_keys = [
+        *_REST_POLL_KEYS_STATIC,
+        ("market_overview", "get_market_overview", {"symbols": overview_symbols, "quotes_timeout": 4.0}),
+    ]
     while True:
-        for key, cmd, ns_args in _REST_POLL_KEYS:
+        for key, cmd, ns_args in poll_keys:
             fn = fn_map[cmd]
             try:
                 result = await fn(argparse.Namespace(**ns_args))
@@ -764,7 +710,7 @@ async def _rest_poller(conn: sqlite3.Connection) -> None:
         await asyncio.sleep(_REST_POLL_INTERVAL)
 
 
-def _start_rest_loop(conn: sqlite3.Connection) -> None:
+def _start_rest_loop(conn: sqlite3.Connection, symbols: list[str]) -> None:
     """Spin up a dedicated asyncio event loop in a background thread for REST commands."""
     global _rest_loop
 
@@ -773,7 +719,7 @@ def _start_rest_loop(conn: sqlite3.Connection) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         _rest_loop = loop
-        loop.create_task(_rest_poller(conn))
+        loop.create_task(_rest_poller(conn, symbols))
         loop.run_forever()
 
     t = threading.Thread(target=_run, daemon=True, name="streamer-rest-loop")
@@ -810,18 +756,6 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
         self._respond(200, result)
 
     def _dispatch(self, command: str, args: dict) -> dict:
-        # ── GEX symbol update — set by the dashboard on symbol selector change ──
-        if command == "set_gex_symbol":
-            sym = (args.get("symbol") or "").strip().upper()
-            if not sym:
-                return {"ok": False, "error": "symbol required"}
-            state = _http_state
-            if state is None:
-                return {"ok": False, "error": "streamer not running"}
-            state.gex_target_symbol = sym
-            logger.info("GEX channel: symbol update requested → %s", sym)
-            return {"ok": True, "gex_symbol": sym}
-
         # ── Tier 1: pure sync / stream-cache reads (no event loop) ──────────
         if command == "stream_status":
             import tt
@@ -1178,9 +1112,10 @@ def _start_http_server(state: "_State") -> None:
 # Main loop with reconnection
 # ---------------------------------------------------------------------------
 
-async def _main_loop(underlying: str, gex_symbol: str | None = None) -> None:
+async def _main_loop(symbols: list[str]) -> None:
     global _loop
     state = _State()
+    state.symbols = list(symbols)
     _loop = asyncio.get_running_loop()
 
     def _handle_signal(sig, frame):
@@ -1190,20 +1125,19 @@ async def _main_loop(underlying: str, gex_symbol: str | None = None) -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    _start_rest_loop(state.conn)
+    _start_rest_loop(state.conn, symbols)
     _start_http_server(state)
 
     # Write PID
     _PID_FILE.parent.mkdir(exist_ok=True)
     _PID_FILE.write_text(str(os.getpid()))
     logger.info("Streamer PID %d written to %s", os.getpid(), _PID_FILE)
-    if gex_symbol:
-        logger.info("GEX channel enabled for %s (±%d strikes)", gex_symbol, _GEX_STRIKE_COUNT)
+    logger.info("Trading symbols: %s (±%d strikes each, GEX included)", symbols, _WINDOW_STRIKE_COUNT)
 
     delay = _RECONNECT_BASE
     while not state.stop_event.is_set():
         try:
-            await _run_stream(state, underlying, gex_symbol=gex_symbol)
+            await _run_stream(state, symbols)
             delay = _RECONNECT_BASE
         except asyncio.CancelledError:
             if state.stop_event.is_set():
@@ -1281,11 +1215,16 @@ def _cmd_status() -> None:
         info["trade_symbols"] = qtrades["n"]
         info["quote_symbols"] = qquotes["n"]
         info["greek_symbols"] = qgreeks["n"]
-        info["gex_subscribed_symbols"] = len(_http_state.gex_syms) if _http_state else 0
-        oldest = min(
+        # info["subscribed_symbols"] (from the stream_status row above) is the total
+        # across every traded symbol's window — there's no longer a separate GEX-only
+        # channel to report, since every traded symbol's window doubles as its GEX window.
+        # Trade prints (underlying fills) are naturally sparse — a healthy connection
+        # can go many minutes without one — so staleness must be judged by whichever
+        # feed is freshest, not the one that happens to be quietest.
+        newest = max(
             x["last"] for x in (qtrades, qquotes, qgreeks) if x["last"] is not None
         ) if any(x["last"] for x in (qtrades, qquotes, qgreeks)) else None
-        info["oldest_event_age_s"] = round(now - oldest, 1) if oldest else None
+        info["oldest_event_age_s"] = round(now - newest, 1) if newest else None
 
         # Stale-cache guardrail: flags a silently-dead persistent connection
         # (running=true but no fresh events) — see stall incident 2026-07-01.
@@ -1311,14 +1250,26 @@ def _cmd_stop() -> None:
         print(json.dumps({"ok": False, "error": str(exc)}))
 
 
+def _configured_symbols(cfg: dict, cli_override: list[str] | None = None) -> list[str]:
+    """Resolve the traded-symbol list: CLI override > config 'symbols' > deprecated
+    single-symbol 'symbol' key (as a one-element list) > default ["XSP"]."""
+    if cli_override:
+        return [s.strip().upper() for s in cli_override if s.strip()]
+    if cfg.get("symbols"):
+        return [str(s).strip().upper() for s in cfg["symbols"] if str(s).strip()]
+    if cfg.get("symbol"):
+        return [str(cfg["symbol"]).strip().upper()]
+    return ["XSP"]
+
+
 def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="MEICAgent DXLink streamer daemon")
     parser.add_argument("--stop", action="store_true", help="Stop a running daemon")
     parser.add_argument("--status", action="store_true", help="Print status and exit")
-    parser.add_argument("--symbol", default=None, help="Override underlying symbol (default: from config.json)")
-    parser.add_argument("--gex-symbol", default=None, dest="gex_symbol",
-                        help="GEX channel underlying symbol (default: gex_symbol from config.json, fallback SPX)")
+    parser.add_argument("--symbol", action="append", default=None,
+                        help="Override a traded symbol (repeatable, e.g. --symbol XSP --symbol SPX). "
+                             "Default: 'symbols' (or deprecated 'symbol') from config.json.")
     args = parser.parse_args()
 
     if args.status:
@@ -1328,17 +1279,22 @@ def main() -> None:
         _cmd_stop()
         return
 
+    existing_pid = _running_pid()
+    if existing_pid is not None:
+        print(json.dumps({
+            "ok": False,
+            "error": f"Streamer already running (pid {existing_pid}). "
+                     f"Run 'python src/streamer.py --stop' first, or --status to inspect it.",
+        }))
+        raise SystemExit(1)
+
     cfg = _load_config()
-    underlying = (args.symbol or cfg.get("symbol", "XSP")).upper()
-    gex_symbol = (args.gex_symbol or cfg.get("gex_symbol", "SPX")).upper()
-    # Disable GEX channel if it's the same as the trading underlying (redundant)
-    if gex_symbol == underlying:
-        gex_symbol = None
+    symbols = _configured_symbols(cfg, cli_override=args.symbol)
 
     _setup_logging()
-    logger.info("Starting MEICAgent DXLink streamer — underlying: %s", underlying)
+    logger.info("Starting MEICAgent DXLink streamer — symbols: %s", symbols)
 
-    asyncio.run(_main_loop(underlying, gex_symbol=gex_symbol))
+    asyncio.run(_main_loop(symbols))
 
 
 if __name__ == "__main__":

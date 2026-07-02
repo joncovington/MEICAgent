@@ -136,9 +136,13 @@ def _spread_wins_losses(trade_status: str, trade_pnl: float | None, put_leg: dic
     return (pw + cw, pl_ + cl_)
 
 
-def _stats_for_period(conn: sqlite3.Connection, start: str | None = None, end: str | None = None) -> dict:
+def _stats_for_period(conn: sqlite3.Connection, start: str | None = None, end: str | None = None,
+                       symbol: str | None = None) -> dict:
     """Compute stats for a date range, querying ic_trades directly for accuracy.
-    start/end are inclusive YYYY-MM-DD strings; omit to mean unbounded."""
+    start/end are inclusive YYYY-MM-DD strings; omit to mean unbounded. symbol filters to
+    one traded symbol; omit (or "ALL") for the account-wide total across every symbol —
+    this is what the global risk caps (max_concurrent_ics, max_entries_per_day) are checked
+    against, so "ALL" is the economically meaningful default, not just a UI convenience."""
     where = ["status NOT IN ('cancelled', 'pending', 'partial_entry')"]
     params: list = []
     if start:
@@ -147,6 +151,9 @@ def _stats_for_period(conn: sqlite3.Connection, start: str | None = None, end: s
     if end:
         where.append("trade_date <= ?")
         params.append(end)
+    if symbol and symbol.upper() != "ALL":
+        where.append("symbol = ?")
+        params.append(symbol.upper())
     rows = _rows(conn,
         f"SELECT ic_order_id, pnl, status FROM ic_trades WHERE {' AND '.join(where)}",
         params)
@@ -281,23 +288,29 @@ def _build_log_data(n: int = 200) -> dict:
 
 # ── API data builder ──────────────────────────────────────────────────────────
 
-def _build_api_data() -> dict:
+def _build_api_data(symbol: str | None = None) -> dict:
+    """symbol filters trades/stats/analytics to one traded symbol; omit (or "ALL") for the
+    account-wide view across every symbol — the economically meaningful default, since the
+    account's actual risk caps (max_concurrent_ics, max_entries_per_day, buying power) are
+    checked against the combined total, not any one symbol in isolation."""
     if not os.path.exists(_DB_PATH):
         return {"ok": False, "error": "Database not found — run: python src/db.py init_db"}
+
+    sym_filter = symbol.upper() if symbol and symbol.upper() != "ALL" else None
 
     conn = _connect()
     today = _today()
 
     stats = {
-        "today":    _stats_for_period(conn, start=today, end=today),
-        "week":     _stats_for_period(conn, start=_week_start(),  end=today),
-        "month":    _stats_for_period(conn, start=_month_start(), end=today),
-        "year":     _stats_for_period(conn, start=_year_start(),  end=today),
-        "all_time": _stats_for_period(conn, end=today),
+        "today":    _stats_for_period(conn, start=today, end=today, symbol=sym_filter),
+        "week":     _stats_for_period(conn, start=_week_start(),  end=today, symbol=sym_filter),
+        "month":    _stats_for_period(conn, start=_month_start(), end=today, symbol=sym_filter),
+        "year":     _stats_for_period(conn, start=_year_start(),  end=today, symbol=sym_filter),
+        "all_time": _stats_for_period(conn, end=today, symbol=sym_filter),
     }
 
-    raw_trades = _rows(conn, """
-        SELECT ic_order_id, entry_time, fill_confirmed_at,
+    trades_sql = """
+        SELECT ic_order_id, symbol, entry_time, fill_confirmed_at,
                put_strike, call_strike, wing_width, net_credit, quantity,
                put_credit, call_credit, status, session_quality,
                iv_rank_at_entry, iv_skew_signal, price_action_signal,
@@ -306,8 +319,13 @@ def _build_api_data() -> dict:
                ai_entry_reasoning
         FROM ic_trades
         WHERE trade_date = ?
-        ORDER BY entry_time
-    """, (today,))
+    """
+    trades_params: list = [today]
+    if sym_filter:
+        trades_sql += " AND symbol = ?"
+        trades_params.append(sym_filter)
+    trades_sql += " ORDER BY entry_time"
+    raw_trades = _rows(conn, trades_sql, trades_params)
 
     today_legs = _fetch_spread_legs(conn, [t["ic_order_id"] for t in raw_trades])
     trades = []
@@ -334,27 +352,30 @@ def _build_api_data() -> dict:
         ORDER BY summary_date ASC
     """)
 
-    by_session = _rows(conn, """
+    sym_clause = " AND symbol = ?" if sym_filter else ""
+    sym_params = [sym_filter] if sym_filter else []
+
+    by_session = _rows(conn, f"""
         SELECT session_quality,
                COUNT(*) AS total,
                SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) AS wins,
                ROUND(AVG(pnl), 2) AS avg_pnl
         FROM ic_trades
         WHERE status NOT IN ('cancelled','pending','partial_entry')
-          AND session_quality IS NOT NULL
+          AND session_quality IS NOT NULL{sym_clause}
         GROUP BY session_quality
         ORDER BY total DESC
-    """)
+    """, sym_params)
 
-    by_exit = _rows(conn, """
+    by_exit = _rows(conn, f"""
         SELECT COALESCE(exit_reason, 'open') AS exit_reason, COUNT(*) AS count
         FROM ic_trades
-        WHERE status NOT IN ('cancelled','pending','partial_entry')
+        WHERE status NOT IN ('cancelled','pending','partial_entry'){sym_clause}
         GROUP BY exit_reason
         ORDER BY count DESC
-    """)
+    """, sym_params)
 
-    by_iv = _rows(conn, """
+    by_iv = _rows(conn, f"""
         SELECT
             CASE
                 WHEN iv_rank_at_entry < 0.25 THEN '<25%'
@@ -367,18 +388,18 @@ def _build_api_data() -> dict:
             SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) AS wins
         FROM ic_trades
         WHERE pnl IS NOT NULL AND iv_rank_at_entry IS NOT NULL
-          AND status NOT IN ('cancelled','pending','partial_entry')
+          AND status NOT IN ('cancelled','pending','partial_entry'){sym_clause}
         GROUP BY iv_bucket
         ORDER BY MIN(iv_rank_at_entry)
-    """)
+    """, sym_params)
 
-    fee_row = _one(conn, """
+    fee_row = _one(conn, f"""
         SELECT COALESCE(SUM(net_credit * quantity), 0) AS gross_credit,
                COALESCE(SUM(fees), 0)                  AS total_fees,
                COALESCE(SUM(pnl), 0)                   AS net_pnl
         FROM ic_trades
-        WHERE status NOT IN ('cancelled','pending','partial_entry')
-    """) or {}
+        WHERE status NOT IN ('cancelled','pending','partial_entry'){sym_clause}
+    """, sym_params) or {}
     gross = float(fee_row.get("gross_credit") or 0)
     fees  = float(fee_row.get("total_fees") or 0)
     net   = float(fee_row.get("net_pnl") or 0)
@@ -389,16 +410,16 @@ def _build_api_data() -> dict:
         "fee_drag_pct":  round(fees / gross * 100, 1) if gross > 0 else None,
     }
 
-    raw_recent = _rows(conn, """
-        SELECT trade_date, ic_order_id, entry_time, exit_time,
+    raw_recent = _rows(conn, f"""
+        SELECT trade_date, ic_order_id, symbol, entry_time, exit_time,
                put_strike, call_strike, wing_width,
                net_credit, put_credit, call_credit,
                status, exit_reason, pnl, fees, session_quality
         FROM ic_trades
-        WHERE status NOT IN ('cancelled','pending','partial_entry')
+        WHERE status NOT IN ('cancelled','pending','partial_entry'){sym_clause}
         ORDER BY trade_date DESC, entry_time DESC
         LIMIT 60
-    """)
+    """, sym_params)
 
     recent_legs = _fetch_spread_legs(conn, [t["ic_order_id"] for t in raw_recent])
     recent_trades = []
@@ -409,6 +430,7 @@ def _build_api_data() -> dict:
         recent_trades.append({
             "trade_date":    t.get("trade_date"),
             "ic_order_id":   t.get("ic_order_id"),
+            "symbol":        t.get("symbol"),
             "entry_time":    t.get("entry_time"),
             "exit_time":     t.get("exit_time"),
             "put_strike":    t.get("put_strike"),
@@ -434,6 +456,8 @@ def _build_api_data() -> dict:
         "ok":         True,
         "as_of":      _now_iso(),
         "today":      today,
+        "symbols":         _load_symbols(),   # every configured symbol, for the selector
+        "selected_symbol": sym_filter or "ALL",
         "stats":      stats,
         "trades":     trades,
         "last_loop":  last_loop,
@@ -450,12 +474,24 @@ def _build_api_data() -> dict:
 
 # ── GEX data builder ──────────────────────────────────────────────────────────
 
-def _load_symbol() -> str:
+def _load_symbols() -> list[str]:
+    """Every traded symbol, in config order. Falls back to the deprecated
+    single-symbol 'symbol' key, then to ["XSP"], if 'symbols' is absent."""
     try:
         with open(_CONFIG_PATH) as f:
-            return json.load(f).get("symbol", "XSP").upper()
+            cfg = json.load(f)
     except Exception:
-        return "XSP"
+        return ["XSP"]
+    if cfg.get("symbols"):
+        return [str(s).strip().upper() for s in cfg["symbols"] if str(s).strip()]
+    if cfg.get("symbol"):
+        return [str(cfg["symbol"]).strip().upper()]
+    return ["XSP"]
+
+
+def _load_symbol() -> str:
+    """The default/first traded symbol — used when no symbol is specified explicitly."""
+    return _load_symbols()[0]
 
 
 def _compute_zero_gamma(series: list[dict]) -> float | None:
@@ -471,24 +507,12 @@ def _compute_zero_gamma(series: list[dict]) -> float | None:
 _TT_CMD = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tt.py")]
 _STREAMER_API = "http://127.0.0.1:7699/api"
 
-# Common symbols offered in the GEX symbol picker
-GEX_SYMBOLS = ["XSP", "SPX", "SPY", "QQQ", "NDX", "IWM", "DIA"]
-
-
-def _notify_streamer_gex_symbol(symbol: str) -> None:
-    """Tell the streamer daemon to switch its GEX subscription to symbol.
-    Fire-and-forget — dashboard remains responsive even if the streamer is down.
-    """
-    import urllib.request
-    try:
-        payload = json.dumps({"command": "set_gex_symbol", "args": {"symbol": symbol}}).encode()
-        req = urllib.request.Request(
-            _STREAMER_API, data=payload,
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        urllib.request.urlopen(req, timeout=1)
-    except Exception:
-        pass  # streamer not running or unreachable — dashboard falls back to REST
+# GEX preview is restricted to actively traded symbols (config's `symbols` list). Open
+# interest — required for any meaningful GEX number — only ever comes from a live DXLink
+# Summary subscription; REST never carries it. Every traded symbol already has a permanent,
+# OI-backed subscription window (see streamer.py's _symbol_refresher), so there is no
+# REST-only "preview any symbol" mode anymore — an arbitrary non-traded symbol would just
+# show a flat zero-OI GEX profile, which is worse than not offering it at all.
 
 
 def _fetch_spot_rest(symbol: str) -> float | None:
@@ -968,6 +992,10 @@ nav{flex:1;padding:10px 0}
     <div class="frame" style="flex:0 0 auto">
       <div class="frame-hdr">
         <span class="frame-title">Performance</span>
+        <select id="main-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
+                border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;outline:none;margin-left:10px">
+          <option value="ALL" selected>All symbols</option>
+        </select>
         <span class="frame-sub" id="as-of"></span>
       </div>
       <div class="stats-wrap">
@@ -1026,14 +1054,14 @@ nav{flex:1;padding:10px 0}
         <table class="ttbl">
           <thead>
             <tr>
-              <th>TIME</th><th>WIDTH</th><th>PUT STRIKE</th><th>CALL STRIKE</th>
+              <th>TIME</th><th>SYMBOL</th><th>WIDTH</th><th>PUT STRIKE</th><th>CALL STRIKE</th>
               <th>PUT $</th><th>CALL $</th><th>NET CREDIT</th>
               <th>PUT STATUS</th><th>CALL STATUS</th>
               <th style="text-align:right">P&amp;L</th>
             </tr>
           </thead>
           <tbody id="tbody">
-            <tr><td colspan="10" class="empty">Loading&hellip;</td></tr>
+            <tr><td colspan="11" class="empty">Loading&hellip;</td></tr>
           </tbody>
         </table>
       </div>
@@ -1091,7 +1119,7 @@ nav{flex:1;padding:10px 0}
         <div style="overflow-x:auto">
           <table class="atable" id="recent-tbl" style="width:100%;min-width:700px">
             <thead><tr>
-              <th>Date</th><th>Strikes</th><th>Width</th>
+              <th>Date</th><th>Symbol</th><th>Strikes</th><th>Width</th>
               <th>Credit</th><th>Put</th><th>Put $</th>
               <th>Call</th><th>Call $</th>
               <th>P&amp;L</th><th>Session</th>
@@ -1107,28 +1135,14 @@ nav{flex:1;padding:10px 0}
   <div class="view" id="view-gex">
     <div class="gex-view" id="gex-inner">
 
-      <!-- Symbol selector -->
+      <!-- Symbol selector — restricted to actively traded symbols (config.json's `symbols`);
+           GEX needs live open interest, which only ever comes from a subscribed symbol, so
+           there's no "preview any symbol" free-text option anymore. -->
       <div style="display:flex;align-items:center;gap:10px;padding:16px 24px 0">
         <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Symbol</span>
         <select id="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
                 border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;outline:none">
-          <option value="SPX" selected>SPX</option>
-          <option value="XSP">XSP</option>
-          <option value="SPY">SPY</option>
-          <option value="QQQ">QQQ</option>
-          <option value="NDX">NDX</option>
-          <option value="IWM">IWM</option>
-          <option value="DIA">DIA</option>
         </select>
-        <input id="gex-symbol-custom" type="text" placeholder="custom…"
-               style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
-                      border-radius:4px;padding:4px 8px;font-size:12px;width:80px;outline:none"
-               maxlength="6">
-        <button id="gex-load-btn"
-                style="background:#00c896;color:#0a0d12;border:none;border-radius:4px;
-                       padding:4px 12px;font-size:11px;font-weight:700;cursor:pointer">
-          Load
-        </button>
         <span id="gex-source-badge" style="font-size:10px;color:#6b7280;margin-left:4px"></span>
       </div>
 
@@ -1316,7 +1330,7 @@ function renderTrades(trades) {
   const tbody = document.getElementById('tbody');
   const lbl   = document.getElementById('trade-count');
   if (!trades || !trades.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">No trades today — agent is monitoring</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">No trades today — agent is monitoring</td></tr>';
     lbl.textContent = '';
     return;
   }
@@ -1330,6 +1344,7 @@ function renderTrades(trades) {
     const tip = (t.ai_entry_reasoning || '').replace(/"/g, '&quot;');
     return '<tr title="' + tip + '">' +
       '<td>' + fTime(t.entry_time) + '</td>' +
+      '<td style="color:#6b7280;font-size:10px">' + (t.symbol || '—') + '</td>' +
       '<td class="tr">' + (t.wing_width != null ? t.wing_width : '—') + '</td>' +
       '<td class="tr">' + (t.put_strike  != null ? t.put_strike  : '—') + '</td>' +
       '<td class="tr">' + (t.call_strike != null ? t.call_strike : '—') + '</td>' +
@@ -1451,7 +1466,7 @@ function renderHistory(d) {
   // Recent trades
   const rb = document.querySelector('#recent-tbl tbody');
   const rt = a.recent_trades || [];
-  rb.innerHTML = !rt.length ? '<tr><td colspan="10" class="empty">No trade history</td></tr>'
+  rb.innerHTML = !rt.length ? '<tr><td colspan="11" class="empty">No trade history</td></tr>'
     : rt.map(t => {
         const pnlNet = (t.pnl != null && t.fees != null) ? t.pnl - t.fees : t.pnl;
         const pc = pnlNet != null ? (pnlNet >= 0 ? 'pos' : 'neg') : '';
@@ -1459,6 +1474,7 @@ function renderHistory(d) {
         const strikes = (t.put_strike != null ? t.put_strike : '—') + '/' + (t.call_strike != null ? t.call_strike : '—');
         return '<tr>' +
           '<td>' + dateStr + '</td>' +
+          '<td style="color:#6b7280;font-size:10px">' + (t.symbol || '—') + '</td>' +
           '<td class="tr">' + strikes + '</td>' +
           '<td class="tr">' + (t.wing_width != null ? t.wing_width : '—') + '</td>' +
           '<td class="tr tcredit">$' + Number(t.net_credit || 0).toFixed(2) + '</td>' +
@@ -1472,12 +1488,34 @@ function renderHistory(d) {
       }).join('');
 }
 
+// ── symbol selectors ─────────────────────────────────────────────────────────
+// Populated once from the traded-symbols list the server reports (config.json's
+// `symbols`) — both the main-view filter and the GEX picker draw from the same
+// list, since GEX preview is restricted to actively traded symbols (open interest
+// only ever comes from a live subscription, never REST, so previewing a
+// non-traded symbol's GEX would just show a flat zero profile).
+let symbolsPopulated = false;
+function populateSymbolSelectors(symbols) {
+  if (symbolsPopulated || !symbols || !symbols.length) return;
+  symbolsPopulated = true;
+  const mainSel = document.getElementById('main-symbol-select');
+  const gexSel = document.getElementById('gex-symbol-select');
+  symbols.forEach(sym => {
+    const o1 = document.createElement('option'); o1.value = sym; o1.textContent = sym;
+    mainSel.appendChild(o1);
+    const o2 = document.createElement('option'); o2.value = sym; o2.textContent = sym;
+    gexSel.appendChild(o2);
+  });
+  gexSel.value = symbols[0];
+}
+
 // ── render all ────────────────────────────────────────────────────────────────
 function renderAll(d) {
   cache = d;
   document.getElementById('disc-banner').style.display = 'none';
   document.getElementById('as-of').textContent = d.as_of
     ? d.as_of.substring(0, 19).replace('T', ' ') + ' ET' : '';
+  populateSymbolSelectors(d.symbols);
   renderStats(d.stats || {});
   renderTrades(d.trades || []);
   renderStatus(d);
@@ -1487,12 +1525,13 @@ function renderAll(d) {
 // ── fetch ─────────────────────────────────────────────────────────────────────
 async function fetchData() {
   try {
-    const r = await fetch('/api/data');
+    const sym = document.getElementById('main-symbol-select').value || 'ALL';
+    const r = await fetch('/api/data?symbol=' + encodeURIComponent(sym));
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     if (d.ok === false) {
       document.getElementById('tbody').innerHTML =
-        '<tr><td colspan="10" class="empty">' + (d.error || 'Error loading data') + '</td></tr>';
+        '<tr><td colspan="11" class="empty">' + (d.error || 'Error loading data') + '</td></tr>';
       return;
     }
     renderAll(d);
@@ -1502,6 +1541,8 @@ async function fetchData() {
     document.getElementById('slabel').textContent = 'DISCONNECTED';
   }
 }
+
+document.getElementById('main-symbol-select').addEventListener('change', fetchData);
 
 // ── log tail ──────────────────────────────────────────────────────────────────
 let logPaused = false;
@@ -1761,17 +1802,17 @@ function _initGexSymbol() {
   const sel = document.getElementById('gex-symbol-select');
   if ([...sel.options].some(o => o.value === sym)) {
     sel.value = sym;
-    document.getElementById('gex-symbol-custom').value = '';
   }
 }
 
 function gexSymbol() {
-  const custom = (document.getElementById('gex-symbol-custom').value || '').trim().toUpperCase();
-  return custom || document.getElementById('gex-symbol-select').value || 'SPX';
+  const sel = document.getElementById('gex-symbol-select');
+  return sel.value || (sel.options.length ? sel.options[0].value : '');
 }
 
 async function fetchGex() {
   const sym = gexSymbol();
+  if (!sym) return;  // selector not populated yet — wait for the next auto-refresh tick
   const badge = document.getElementById('gex-source-badge');
   badge.textContent = 'Loading…';
   try {
@@ -1818,14 +1859,7 @@ document.querySelectorAll('.gex-tab').forEach(tab => {
 });
 
 // Symbol selector
-document.getElementById('gex-load-btn').addEventListener('click', fetchGex);
-document.getElementById('gex-symbol-select').addEventListener('change', () => {
-  document.getElementById('gex-symbol-custom').value = '';
-  fetchGex();
-});
-document.getElementById('gex-symbol-custom').addEventListener('keydown', e => {
-  if (e.key === 'Enter') fetchGex();
-});
+document.getElementById('gex-symbol-select').addEventListener('change', fetchGex);
 
 // GEX radio toggle listeners
 document.querySelectorAll('input[name="gex_view"]').forEach(el =>
@@ -1834,8 +1868,9 @@ document.querySelectorAll('input[name="vol_view"]').forEach(el =>
   el.addEventListener('change', () => { if (gexData) renderGex(gexData); }));
 
 // ── auto-refresh ──────────────────────────────────────────────────────────────
-fetchData();
-fetchGex();
+// fetchGex() no-ops until the symbol selector is populated (by fetchData()'s response),
+// so chain the first GEX fetch after the first data fetch rather than firing in parallel.
+fetchData().then(fetchGex);
 setInterval(() => {
   cd--;
   document.getElementById('scountdown').textContent = 'Refresh in ' + cd + 's';
@@ -1859,9 +1894,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        elif self.path == "/api/data":
+        elif self.path.startswith("/api/data"):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            sym = (qs.get("symbol") or [None])[0]
             try:
-                result = _build_api_data()
+                result = _build_api_data(sym)
             except Exception as exc:
                 result = {"ok": False, "error": str(exc)}
             body = json.dumps(result, default=str).encode("utf-8")
@@ -1874,9 +1911,6 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/gex"):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             sym = (qs.get("symbol") or [None])[0]
-            # Notify streamer to switch GEX subscription channel to this symbol
-            if sym:
-                _notify_streamer_gex_symbol(sym)
             try:
                 result = _build_gex_data(sym)
             except Exception as exc:

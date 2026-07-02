@@ -360,3 +360,97 @@ class TestSyncGetStrategies:
         self.conn.commit()
         result = self.h._sync_get_strategies({"symbol": "XSP", "wing_width": 1, "short_delta": 0.15})
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Multi-symbol config resolution
+# ---------------------------------------------------------------------------
+
+class TestConfiguredSymbols:
+    def test_symbols_list_uppercased(self):
+        assert _streamer._configured_symbols({"symbols": ["xsp", "spx"]}) == ["XSP", "SPX"]
+
+    def test_deprecated_singular_symbol_alias(self):
+        assert _streamer._configured_symbols({"symbol": "xsp"}) == ["XSP"]
+
+    def test_symbols_takes_precedence_over_singular(self):
+        assert _streamer._configured_symbols({"symbols": ["SPX"], "symbol": "XSP"}) == ["SPX"]
+
+    def test_default_when_config_empty(self):
+        assert _streamer._configured_symbols({}) == ["XSP"]
+
+    def test_cli_override_takes_precedence(self):
+        assert _streamer._configured_symbols(
+            {"symbols": ["XSP"]}, cli_override=["spx", "ndx"]
+        ) == ["SPX", "NDX"]
+
+    def test_blank_entries_filtered(self):
+        assert _streamer._configured_symbols({"symbols": ["XSP", " ", "SPX"]}) == ["XSP", "SPX"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-symbol subscription resolution
+# ---------------------------------------------------------------------------
+
+class TestResolveSubscriptionsMultiSymbol:
+    def test_trade_subscribes_every_symbol(self):
+        subs = _streamer._resolve_subscriptions(["XSP", "SPX", "NDX"])
+        assert subs["Trade"] == ["XSP", "SPX", "NDX"]
+
+    def test_summary_seeds_every_symbol(self):
+        subs = _streamer._resolve_subscriptions(["XSP", "SPX"])
+        assert "XSP" in subs["Summary"]
+        assert "SPX" in subs["Summary"]
+
+    def test_single_symbol_still_a_list(self):
+        subs = _streamer._resolve_subscriptions(["XSP"])
+        assert subs["Trade"] == ["XSP"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-symbol cache isolation — two symbols' chains must never cross-contaminate
+# ---------------------------------------------------------------------------
+
+class TestMultiSymbolChainIsolation:
+    def setup_method(self):
+        self.conn, self.path = _make_file_db()
+        self.h = _handler(self.path)
+        self.exp = "2026-06-30"
+
+    def teardown_method(self):
+        self.conn.close()
+
+    def _seed(self, underlying: str, strikes: list[float]):
+        now = time.time()
+        for strike in strikes:
+            for otype in ("C", "P"):
+                sym = f".{underlying}260630{otype}{int(strike)}"
+                opt = {
+                    "streamer_symbol": sym, "option_type": otype,
+                    "strike_price": str(strike), "expiration_date": self.exp,
+                    "shares_per_contract": 100,
+                }
+                self.conn.execute(
+                    "INSERT INTO stream_chain (streamer_symbol, expiration, underlying_symbol, data_json, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (sym, self.exp, underlying, json.dumps(opt), now),
+                )
+        self.conn.commit()
+
+    def test_chain_query_scoped_to_requested_underlying(self):
+        self._seed("XSP", [590, 595])
+        self._seed("SPX", [5900, 5950])
+        xsp_result = self.h._sync_get_option_chain({"symbol": "XSP"})
+        spx_result = self.h._sync_get_option_chain({"symbol": "SPX"})
+        assert xsp_result is not None and spx_result is not None
+        xsp_syms = {o["streamer_symbol"] for o in xsp_result["chain"][self.exp]}
+        spx_syms = {o["streamer_symbol"] for o in spx_result["chain"][self.exp]}
+        assert all(".XSP" in s for s in xsp_syms)
+        assert all(".SPX" in s for s in spx_syms)
+        assert xsp_syms.isdisjoint(spx_syms)
+
+    def test_missing_symbol_unaffected_by_other_symbols_data(self):
+        self._seed("XSP", [590])
+        # NDX was never seeded — must not accidentally pick up XSP's chain
+        result = self.h._sync_get_option_chain({"symbol": "NDX"})
+        assert result is None

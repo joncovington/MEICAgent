@@ -1762,20 +1762,26 @@ function renderIvChart(series, spot) {
 }
 
 function renderOiChart(series, spot) {
-  series = _trimToData(series, ['call_oi', 'put_oi'], 3);
+  series = _trimToData(series, ['call_oi', 'put_oi', 'call_vol', 'put_vol'], 3);
   const labels = series.map(s => s.strike);
-  // Calls positive (right), puts negated (left) — mirrored horizontal bars
+  // Calls positive (right), puts negated (left) — mirrored horizontal bars. OI (dark) and
+  // Volume (light) share the same origin and overlap rather than stack — Volume is drawn
+  // second so it renders in front, appearing as a short highlighted segment near the base
+  // of the (usually much larger) OI bar.
   const ds = [
-    { label: 'Call OI', data: series.map(s => s.call_oi),  backgroundColor: 'green' },
-    { label: 'Put OI',  data: series.map(s => -s.put_oi),  backgroundColor: 'red' },
+    { label: 'Call OI',     data: series.map(s => s.call_oi),   backgroundColor: 'green' },
+    { label: 'Put OI',      data: series.map(s => -s.put_oi),   backgroundColor: 'red' },
+    { label: 'Call Volume', data: series.map(s => s.call_vol),  backgroundColor: 'lightgreen' },
+    { label: 'Put Volume',  data: series.map(s => -s.put_vol),  backgroundColor: 'lightcoral' },
   ];
   const opts = _baseOpts();
   opts.indexAxis = 'y';
   opts.datasets = { bar: { minBarThickness: 14 } };
   opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
-  opts.scales.x.title = { display: true, text: 'Open Interest', color: '#6b7280' };
-  opts.scales.x.stacked = true;
-  opts.scales.y.stacked = true;
+  opts.scales.x.title = { display: true, text: 'Open Interest / Volume', color: '#6b7280' };
+  // grouped:false makes same-category datasets overlap (full width, drawn in array order)
+  // instead of Chart.js's default of splitting each dataset into its own thin sub-bar.
+  opts.scales.y.grouped = false;
   opts.plugins.tooltip.callbacks = {
     label: ctx => (ctx.dataset.label || '') + ': ' + Math.abs(ctx.parsed.x).toLocaleString()
   };

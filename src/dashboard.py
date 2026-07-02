@@ -1165,17 +1165,6 @@ nav{flex:1;padding:10px 0}
   <div class="view" id="view-gex">
     <div class="gex-view" id="gex-inner">
 
-      <!-- Symbol selector — restricted to actively traded symbols (config.json's `symbols`);
-           GEX needs live open interest, which only ever comes from a subscribed symbol, so
-           there's no "preview any symbol" free-text option anymore. -->
-      <div style="display:flex;align-items:center;gap:10px;padding:16px 24px 0">
-        <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Symbol</span>
-        <select id="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
-                border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;outline:none">
-        </select>
-        <span id="gex-source-badge" style="font-size:10px;color:#6b7280;margin-left:4px"></span>
-      </div>
-
       <div class="gex-body">
       <!-- Sub-tabs: narrow vertical nav on the left, one panel visible at a time -->
       <div class="gex-tabs">
@@ -1195,6 +1184,19 @@ nav{flex:1;padding:10px 0}
               <div style="position:relative;height:260px"><canvas id="gex-main-chart"></canvas></div>
             </div>
             <div id="gex-main-sidebar">
+              <!-- Symbol selector — restricted to actively traded symbols (config.json's
+                   `symbols`); GEX needs live open interest, which only ever comes from a
+                   subscribed symbol, so there's no "preview any symbol" free-text option
+                   anymore. Lives here (GEX tab only) rather than page-level, so it can only
+                   be changed while this tab is active — IV Skew/Volume read whatever symbol
+                   was last selected here. -->
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px">
+                <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Symbol</span>
+                <select id="gex-symbol-select" style="background:#0d1117;color:#e6edf3;border:1px solid #1e2430;
+                        border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;outline:none">
+                </select>
+                <span id="gex-source-badge" style="font-size:10px;color:#6b7280"></span>
+              </div>
               <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px">
                 <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">GEX View</span>
                 <div class="radio-group" id="gex-view-group">

@@ -1916,6 +1916,11 @@ function renderOiChart(series, spot) {
   ];
   const opts = _baseOpts();
   opts.indexAxis = 'y';
+  // Tooltip/hover hit-testing must search along the same axis as indexAxis, but
+  // Chart.js's interaction.axis defaults to 'x' regardless of indexAxis -- without
+  // this the tooltip picks the nearest point by X (GEX $ value) instead of Y
+  // (strike), so it jumps around and shows the wrong strike while hovering.
+  opts.interaction = { mode: 'index', intersect: false, axis: 'y' };
   opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
   opts.scales.y.reverse = true;  // highest strike at top, lowest at bottom
   opts.scales.x.title = { display: true, text: 'Open Interest / Volume', color: '#6b7280' };
@@ -1947,6 +1952,11 @@ function renderVolChart(series, spot, mode) {
   }
   const opts = _baseOpts();
   opts.indexAxis = 'y';
+  // Tooltip/hover hit-testing must search along the same axis as indexAxis, but
+  // Chart.js's interaction.axis defaults to 'x' regardless of indexAxis -- without
+  // this the tooltip picks the nearest point by X (GEX $ value) instead of Y
+  // (strike), so it jumps around and shows the wrong strike while hovering.
+  opts.interaction = { mode: 'index', intersect: false, axis: 'y' };
   opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
   opts.scales.y.reverse = true;  // highest strike at top, lowest at bottom
   opts.scales.x.title = { display: true, text: 'Volume', color: '#6b7280' };
@@ -2026,6 +2036,11 @@ function renderGexMainChart(series, spot, zero, mode, callWall, putWall, spotHis
   document.getElementById('gex-chart-title').textContent = titleText;
   const opts = _baseOpts();
   opts.indexAxis = 'y';
+  // Tooltip/hover hit-testing must search along the same axis as indexAxis, but
+  // Chart.js's interaction.axis defaults to 'x' regardless of indexAxis -- without
+  // this the tooltip picks the nearest point by X (GEX $ value) instead of Y
+  // (strike), so it jumps around and shows the wrong strike while hovering.
+  opts.interaction = { mode: 'index', intersect: false, axis: 'y' };
   opts.scales.y.title = { display: true, text: 'Strike Price', color: '#6b7280' };
   opts.scales.y.reverse = true;  // highest strike at top, lowest at bottom
   opts.scales.x.title = { display: true, text: 'Gamma Exposure ($)', color: '#6b7280' };

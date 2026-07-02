@@ -1713,6 +1713,16 @@ function _trimToData(series, valueKeys, pad) {
   return series.slice(Math.max(0, lo - pad), Math.min(series.length, hi + pad + 1));
 }
 
+// Fixed-height containers squeeze bar thickness down as strike count grows — grow the
+// container to fit instead, so each bar keeps a consistent, readable thickness regardless
+// of how many strikes _trimToData left in view.
+function _growChartHeight(canvasId, numRows, perRow, minH) {
+  const canvas = document.getElementById(canvasId);
+  const wrap = canvas && canvas.parentElement;
+  if (!wrap) return;
+  wrap.style.height = Math.max(minH, numRows * perRow) + 'px';
+}
+
 function _baseOpts(plugins) {
   return {
     responsive: true, maintainAspectRatio: false,
@@ -1761,6 +1771,7 @@ function renderOiChart(series, spot) {
   ];
   const opts = _baseOpts();
   opts.indexAxis = 'y';
+  opts.datasets = { bar: { minBarThickness: 14 } };
   opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
   opts.scales.x.title = { display: true, text: 'Open Interest', color: '#6b7280' };
   opts.scales.x.stacked = true;
@@ -1769,6 +1780,7 @@ function renderOiChart(series, spot) {
     label: ctx => (ctx.dataset.label || '') + ': ' + Math.abs(ctx.parsed.x).toLocaleString()
   };
   opts.plugins.hline = spot != null ? _hline(spot, '$' + spot.toFixed(2), '#f5a623') : {};
+  _growChartHeight('gex-oi-chart', labels.length, 18, 220);
   if (gexOiChart) { gexOiChart.destroy(); gexOiChart = null; }
   gexOiChart = new Chart(document.getElementById('gex-oi-chart'),
     { type: 'bar', data: { labels, datasets: ds }, options: opts,
@@ -1790,10 +1802,12 @@ function renderVolChart(series, spot, mode) {
   }
   const opts = _baseOpts();
   opts.indexAxis = 'y';
+  opts.datasets = { bar: { minBarThickness: 14 } };
   opts.scales.y.title = { display: true, text: 'Strike', color: '#6b7280' };
   opts.scales.x.title = { display: true, text: 'Volume', color: '#6b7280' };
   if (mode === 'split') { opts.scales.x.stacked = true; opts.scales.y.stacked = true; }
   opts.plugins.tooltip.callbacks = { label: ctx => (ctx.dataset.label||'') + ': ' + Math.abs(ctx.parsed.x).toLocaleString() };
+  _growChartHeight('gex-vol-chart', labels.length, 18, 260);
   if (gexVolChart) { gexVolChart.destroy(); gexVolChart = null; }
   gexVolChart = new Chart(document.getElementById('gex-vol-chart'),
     { type: 'bar', data: { labels, datasets: ds }, options: opts,
@@ -1825,6 +1839,7 @@ function renderGexMainChart(series, spot, zero, mode) {
   document.getElementById('gex-chart-title').textContent = titleText;
   const opts = _baseOpts();
   opts.indexAxis = 'y';
+  opts.datasets = { bar: { minBarThickness: 14 } };
   opts.scales.y.title = { display: true, text: 'Strike Price', color: '#6b7280' };
   opts.scales.x.title = { display: true, text: 'Gamma Exposure ($)', color: '#6b7280' };
   if (stacked) { opts.scales.x.stacked = true; opts.scales.y.stacked = true; }
@@ -1832,6 +1847,7 @@ function renderGexMainChart(series, spot, zero, mode) {
   opts.plugins.tooltip.callbacks = {
     label: ctx => (ctx.dataset.label||'') + ': ' + fGex(ctx.parsed.x)
   };
+  _growChartHeight('gex-main-chart', labels.length, 18, 260);
   const hlinePlugins = [];
   if (spot != null) hlinePlugins.push(_hline(spot, '$' + spot.toFixed(2), 'orange'));
   if (zero != null) hlinePlugins.push(_hline(zero, 'Zero Γ: $' + zero.toFixed(2), 'purple'));

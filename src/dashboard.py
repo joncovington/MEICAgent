@@ -1706,6 +1706,31 @@ function _vline(x, label, color) {
   };
 }
 
+// The strike (y) axis is a Chart.js category scale — its own getPixelForValue() only
+// resolves values that exactly match one of its labels (it does a plain indexOf), so a
+// continuous price like spot or gamma_flip that falls between two strikes returns nothing.
+// Find the two labels bracketing `value` and interpolate the pixel position between their
+// (reliable) tick positions instead.
+function _categoryPixelForValue(scale, labels, value) {
+  if (!labels || !labels.length) return null;
+  const n = labels.length;
+  const clampIdx = i => Math.max(0, Math.min(n - 1, i));
+  let loIdx = 0;
+  for (let i = 0; i < n - 1; i++) {
+    if (value >= labels[i] && value <= labels[i + 1]) { loIdx = i; break; }
+    if (value < labels[0]) { loIdx = 0; break; }
+    if (value > labels[n - 1]) { loIdx = n - 2; break; }
+  }
+  const hiIdx = clampIdx(loIdx + 1);
+  const lo = labels[loIdx], hi = labels[hiIdx];
+  const p0 = scale.getPixelForTick(loIdx);
+  const p1 = scale.getPixelForTick(hiIdx);
+  if (p0 == null || p1 == null || isNaN(p0) || isNaN(p1)) return null;
+  if (hi === lo) return p0;
+  const frac = (value - lo) / (hi - lo);
+  return p0 + (p1 - p0) * frac;
+}
+
 function _hline(y, label, color, opts) {
   const solid = opts && opts.solid;
   return {
@@ -1713,9 +1738,12 @@ function _hline(y, label, color, opts) {
     beforeDatasetsDraw(chart) {
       const {ctx, scales} = chart;
       if (!scales.y) return;
-      const yPx = scales.y.getPixelForValue(y);
+      let yPx = _categoryPixelForValue(scales.y, chart.data.labels, y);
       if (yPx == null || isNaN(yPx)) return;
-      const {left, right} = chart.chartArea;
+      const {left, right, top, bottom} = chart.chartArea;
+      // Clamp — spot/gamma_flip can fall outside the (trimmed) strike window shown, in
+      // which case the interpolated pixel would land off the plot area.
+      yPx = Math.max(top, Math.min(bottom, yPx));
       ctx.save();
       if (!solid) ctx.setLineDash([4, 4]);
       ctx.strokeStyle = color;

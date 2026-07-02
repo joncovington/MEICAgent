@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 import webbrowser
 from datetime import datetime, timedelta, timezone
@@ -580,6 +581,41 @@ def _fetch_chain_rest(symbol: str, around_price: float | None = None) -> tuple[l
     return options, greeks, quotes, actual_underlying
 
 
+def _ensure_spot_history_table(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gex_spot_history (
+            symbol      TEXT NOT NULL,
+            trade_date  TEXT NOT NULL,
+            ts          REAL NOT NULL,
+            spot        REAL NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gex_spot_history_sym_date "
+                 "ON gex_spot_history(symbol, trade_date)")
+
+
+def _record_and_fetch_spot_history(conn: sqlite3.Connection, symbol: str, spot: float | None) -> list[dict]:
+    """Append today's spot price tick (if available) and return the day's trail so far.
+
+    One row per GEX fetch (client polls roughly every 15s) — plotted as a persistent
+    light-blue point trail on the GEX chart, surviving page reloads/dashboard restarts
+    since it's stored in stream_cache.db rather than kept only in browser memory.
+    """
+    _ensure_spot_history_table(conn)
+    today = _today()
+    if spot is not None:
+        conn.execute(
+            "INSERT INTO gex_spot_history (symbol, trade_date, ts, spot) VALUES (?,?,?,?)",
+            (symbol, today, time.time(), spot),
+        )
+        conn.commit()
+    rows = conn.execute(
+        "SELECT ts, spot FROM gex_spot_history WHERE symbol = ? AND trade_date = ? ORDER BY ts",
+        (symbol, today),
+    ).fetchall()
+    return [{"ts": r["ts"], "spot": r["spot"]} for r in rows]
+
+
 def _build_gex_data(symbol: str | None = None) -> dict:
     symbol = (symbol or _load_symbol()).strip().upper()
 
@@ -782,6 +818,13 @@ def _build_gex_data(symbol: str | None = None) -> dict:
     call_wall_s = max(series, key=lambda s: s["call_gex"], default=None)
     put_wall_s  = min(series, key=lambda s: s["put_gex"], default=None)
 
+    hist_conn = sqlite3.connect(_CACHE_DB_PATH)
+    hist_conn.row_factory = sqlite3.Row
+    try:
+        spot_history = _record_and_fetch_spot_history(hist_conn, symbol, spot)
+    finally:
+        hist_conn.close()
+
     return {
         "ok":               True,
         "symbol":           symbol,
@@ -789,6 +832,7 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         "underlying_price": spot,
         "source":           source,
         "series":           series,
+        "spot_history":     spot_history,
         "totals": {
             "total_call_gex": round(total_call_gex),
             "total_put_gex":  round(total_put_gex),
@@ -1897,7 +1941,36 @@ function renderVolChart(series, spot, mode) {
       plugins: spot != null ? [_hline(spot, '$' + spot.toFixed(2), '#00b4ff', {solid: true})] : [] });
 }
 
-function renderGexMainChart(series, spot, zero, mode, callWall, putWall) {
+// Draws each day's spot-price ticks as small light-blue dots at the zero-GEX origin,
+// positioned along the strike (y) axis via the same category interpolation as the
+// reference lines — over the session this traces the day's price path directly on the
+// GEX profile, similar to the reference layout's dotted price trail.
+function _spotHistoryPlugin(history, labels) {
+  return {
+    id: 'spotHistory',
+    // afterDatasetsDraw, not before — dots sit at x=0, same as where every bar
+    // originates, so drawing before the bars would leave them hidden underneath.
+    afterDatasetsDraw(chart) {
+      const {ctx, scales, chartArea} = chart;
+      if (!scales.x || !scales.y || !history || !history.length) return;
+      const xPx = scales.x.getPixelForValue(0);
+      if (xPx == null || isNaN(xPx)) return;
+      ctx.save();
+      ctx.fillStyle = '#7ec8f2';
+      history.forEach(pt => {
+        let yPx = _categoryPixelForValue(scales.y, labels, pt.spot);
+        if (yPx == null || isNaN(yPx)) return;
+        yPx = Math.max(chartArea.top, Math.min(chartArea.bottom, yPx));
+        ctx.beginPath();
+        ctx.arc(xPx, yPx, 2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
+    }
+  };
+}
+
+function renderGexMainChart(series, spot, zero, mode, callWall, putWall, spotHistory) {
   series = _trimToData(series, ['call_gex', 'put_gex', 'net_gex', 'abs_gex'], 3);
   const labels = series.map(s => s.strike);
   let ds, titleText, stacked = false;
@@ -1945,7 +2018,8 @@ function renderGexMainChart(series, spot, zero, mode, callWall, putWall) {
   if (gexMainChart) { gexMainChart.destroy(); gexMainChart = null; }
   gexMainChart = new Chart(document.getElementById('gex-main-chart'),
     { type: 'bar', data: { labels, datasets: ds },
-      options: opts, plugins: [opts.plugins.customHlines] });
+      options: opts,
+      plugins: [opts.plugins.customHlines, _spotHistoryPlugin(spotHistory, labels)] });
 }
 
 function renderGexMetrics(totals) {
@@ -1973,6 +2047,7 @@ function renderGex(d) {
   const zero   = d.totals && d.totals.zero_gamma;
   const callWall = d.totals && d.totals.call_wall;
   const putWall  = d.totals && d.totals.put_wall;
+  const spotHistory = d.spot_history || [];
   const sym    = d.symbol || '';
   const exp    = d.expiration || '';
   document.getElementById('gex-iv-sub').textContent   = sym + ' Implied Volatility Skew — Exp: ' + exp;
@@ -1984,7 +2059,7 @@ function renderGex(d) {
   renderIvChart(series, spot);
   renderOiChart(series, spot);
   renderVolChart(series, spot, volMode);
-  renderGexMainChart(series, spot, zero, gexMode, callWall, putWall);
+  renderGexMainChart(series, spot, zero, gexMode, callWall, putWall, spotHistory);
   renderGexMetrics(d.totals);
 }
 

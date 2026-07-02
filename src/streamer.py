@@ -568,6 +568,32 @@ def _write_chain_to_cache(conn: sqlite3.Connection, option_map: dict) -> None:
     logger.info("Cached %d option chain entries", len(rows))
 
 
+_SUBSCRIBE_CHUNK_SIZE = 20  # see _chunked_subscribe for why
+
+
+def _chunked(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+async def _chunked_subscribe(streamer, cls, symbols: list[str], unsubscribe: bool = False) -> None:
+    """Subscribe/unsubscribe in batches of _SUBSCRIBE_CHUNK_SIZE rather than one giant call.
+
+    Root cause of two silent-stall incidents this week: dxFeed's server silently switches a
+    channel from the requested COMPACT data format to FULL (object-per-event instead of a
+    flat array) when a single subscription burst is large enough — observed live right after
+    a fresh window re-center added 82 symbols to the Greeks channel in one call. The installed
+    tastytrade SDK's DXLinkStreamer._map_message only handles COMPACT format; a FULL-format
+    message crashes it with `KeyError: 0` (message[0] is a dict, not the expected str/list),
+    taking down the whole persistent connection's TaskGroup — reconnect happens, but any window
+    re-center this large repeats the trigger. Filed upstream: github.com/tastyware/tastytrade.
+    Keeping each burst small enough avoids ever tripping the server's format-switch heuristic.
+    """
+    fn = streamer.unsubscribe if unsubscribe else streamer.subscribe
+    for chunk in _chunked(symbols, _SUBSCRIBE_CHUNK_SIZE):
+        await fn(cls, chunk)
+
+
 def _atm_window_syms(option_map: dict, center: float, strike_count: int) -> list[str]:
     """Return streamer symbols within strike_count strikes of center on each side."""
     strikes = sorted({float(o.strike_price) for o in option_map.values()})
@@ -627,19 +653,21 @@ async def _symbol_refresher(streamer, state: _State, symbol: str, Quote, Greeks,
                 remove = old_set - new_set
                 try:
                     if add:
-                        await streamer.subscribe(Quote, list(add))
-                        await streamer.subscribe(Greeks, list(add))
-                        await streamer.subscribe(Summary, list(add))
-                        await streamer.subscribe(Trade, list(add))
+                        add_list = list(add)
+                        await _chunked_subscribe(streamer, Quote, add_list)
+                        await _chunked_subscribe(streamer, Greeks, add_list)
+                        await _chunked_subscribe(streamer, Summary, add_list)
+                        await _chunked_subscribe(streamer, Trade, add_list)
                     if remove:
                         # Only unsubscribe if not also needed by an open IC leg
                         open_legs = set(_open_trade_streamer_symbols())
                         safe_remove = remove - open_legs
                         if safe_remove:
-                            await streamer.unsubscribe(Quote, list(safe_remove))
-                            await streamer.unsubscribe(Greeks, list(safe_remove))
-                            await streamer.unsubscribe(Summary, list(safe_remove))
-                            await streamer.unsubscribe(Trade, list(safe_remove))
+                            safe_remove_list = list(safe_remove)
+                            await _chunked_subscribe(streamer, Quote, safe_remove_list, unsubscribe=True)
+                            await _chunked_subscribe(streamer, Greeks, safe_remove_list, unsubscribe=True)
+                            await _chunked_subscribe(streamer, Summary, safe_remove_list, unsubscribe=True)
+                            await _chunked_subscribe(streamer, Trade, safe_remove_list, unsubscribe=True)
                     state.window_syms[symbol] = new_syms
                     _upsert_status(state.conn, subscribed_symbols=_total_subscribed(state))
                     logger.info(

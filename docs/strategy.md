@@ -87,7 +87,7 @@ closing limit price:  (short_ask − long_bid) × stop_limit_ratio              
 
 At these levels, closing the stopped spread costs approximately the full IC credit, leaving the other spread to continue toward expiration or its own stop/profit target.
 
-Stops are tightened (never loosened) by AI judgment as conditions change. Triggers for tightening include:
+Stops are tightened (never loosened) by the agent's judgment as conditions change. Triggers for tightening include:
 
 | Condition | Reference trigger |
 |---|---|

@@ -212,7 +212,7 @@ Key fields: `action`, `reasoning`, `open_trades_n`, `today_pnl`, `iv_rank`, `und
 
 ## Agent Loop (CLAUDE.md)
 
-The agent loop is driven by `/loop` (Claude Code self-pacing) following 8 steps each iteration:
+The agent loop is driven by `/loop` (self-pacing scheduler) following 8 steps each iteration:
 
 ```
 1. Load state          → open trades, today count, P&L, current ET time

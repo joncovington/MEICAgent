@@ -1,6 +1,6 @@
 # MEICAgent
 
-An autonomous options trading agent running the **Multiple Entry Iron Condor (MEIC)** strategy on 0DTE index options. It's built on [Claude Code](https://claude.ai/code) rather than a traditional trading-bot framework — the AI itself runs the decision loop every few minutes during market hours, reading live market data, checking a stack of risk gates, and deciding whether to enter, hold, or close positions. It talks to tastytrade directly via their official Python SDK (OAuth2, no middleman broker API). Live trading is gated behind an explicit config flag and defaults to dry-run.
+An autonomous options trading agent running the **Multiple Entry Iron Condor (MEIC)** strategy on 0DTE index options. Rather than a traditional rules-only trading-bot framework, the agent itself runs the decision loop every few minutes during market hours, reading live market data, checking a stack of risk gates, and deciding whether to enter, hold, or close positions. It talks to tastytrade directly via their official Python SDK (OAuth2, no middleman broker API). Live trading is gated behind an explicit config flag and defaults to dry-run.
 
 ## Features
 
@@ -37,7 +37,7 @@ Local web dashboard (auto-refreshing) with:
 
 Everything runs locally against your own tastytrade account — no cloud dependency for trade execution.
 
-The agent runs as a Claude Code `/loop` — on each iteration (~every 5 minutes during market hours) it reads persisted state, assesses market conditions, makes AI-driven entry and stop decisions, executes trades, and logs a plain English account of everything it did and why. Trades **any combination of index or equity symbols**, configured via `symbols` (a list) in `config.json` — equity index options (XSP, SPX, NDX, RUT) and CME futures options (/MES, /ES, /MNQ, /NQ) are all supported. Every symbol must list daily-expiring (0DTE) option chains; the agent hard-stops any entry where the fetched chain's nearest expiration isn't today. Symbols that don't settle in cash at expiration (most equities) should be left out of `cash_settled_symbols` so a missed force-close is escalated as an assignment-risk failure rather than routine cleanup.
+The agent runs as a recurring `/loop` — on each iteration (~every 5 minutes during market hours) it reads persisted state, assesses market conditions, makes automated entry and stop decisions, executes trades, and logs a plain English account of everything it did and why. Trades **any combination of index or equity symbols**, configured via `symbols` (a list) in `config.json` — equity index options (XSP, SPX, NDX, RUT) and CME futures options (/MES, /ES, /MNQ, /NQ) are all supported. Every symbol must list daily-expiring (0DTE) option chains; the agent hard-stops any entry where the fetched chain's nearest expiration isn't today. Symbols that don't settle in cash at expiration (most equities) should be left out of `cash_settled_symbols` so a missed force-close is escalated as an assignment-risk failure rather than routine cleanup.
 
 ---
 
@@ -61,7 +61,7 @@ cp config.example.json config.json   # then edit config.json
 # 3. Initialize the database
 python src/db.py init_db
 
-# 4. Open in Claude Code and start the session (before 9:30 ET)
+# 4. Start the session (before 9:30 ET)
 /meic-start
 ```
 
@@ -103,7 +103,7 @@ MEICAgent/
 │   ├── meic_trades.db               # Trade history, loop log, daily summaries
 │   └── stream_cache.db              # Live streamer cache (quotes/greeks/OI/volume/GEX history)
 └── logs/                            # Created at first run (gitignored)
-    ├── agent.log                    # Claude Code session log
+    ├── agent.log                    # Agent session log
     ├── streamer.log                 # Streamer daemon log
     ├── dashboard.log                # Dashboard server log
     └── eod-<date>.md                # Daily end-of-day report, one per trading day

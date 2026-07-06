@@ -26,7 +26,7 @@ To start components individually instead:
 
 ## Starting the loop
 
-Open the MEICAgent folder in VS Code with the Claude Code extension (or run `claude` from this directory), then start the loop **before 9:30 ET**:
+Open the MEICAgent folder in your coding assistant of choice (or start its CLI from this directory), then start the loop **before 9:30 ET**:
 
 ```
 /loop

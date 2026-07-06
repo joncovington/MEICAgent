@@ -3,7 +3,7 @@
 ## Requirements
 
 - **Python 3.11+**
-- **Claude Code** — [claude.ai/code](https://claude.ai/code)
+- **An agentic coding assistant** capable of running project skills/slash commands and maintaining a persistent instructions file (this project's `.claude/commands/` and `CLAUDE.md` follow that convention)
 - **tastytrade account** — live account or developer sandbox (tastytrade does not offer paper trading; the developer sandbox is a separate environment for testing without real capital)
 
 There is no separate MCP server to install — `src/tt.py` talks to tastytrade directly via the official Python SDK (OAuth2).
@@ -51,7 +51,7 @@ Key fields to update in `config.json`:
 | `delta_target` | Short strike delta target (default `0.18`) |
 | `max_wing_width` | Upper bound (points) on spread width; the agent decides the actual wing width per entry rather than picking from a fixed list |
 | `quantity` | Number of contracts per IC leg |
-| `max_entries_per_day` | Hard cap on entries (`-1` = no cap, rely on AI + buying power) |
+| `max_entries_per_day` | Hard cap on entries (`-1` = no cap, rely on the agent's judgment + buying power) |
 | `entry_window_start` | Earliest time to enter new ICs in HH:MM ET (default `"10:00"`) |
 | `separate_spread_entry` | Order structure: `false` = 4-leg combo (default), `true` = separate 2-leg spreads, `"auto"` = agent decides per-iteration based on IV rank, session, and open IC count |
 | `entry_price_strategy` | Limit price strategy: `"mid"` = streaming mid price with a spread-width gate and fallback to natural bid, `"natural_bid"` = always submit at natural bid (safest), `"ioc_step"` = try IOC orders above natural bid then fall back, `"day_improve"` = Day limit above natural bid with cancel-replace, `"auto"` (default) = agent decides per-iteration by session/spread-width/IV rank |
@@ -86,7 +86,7 @@ Tastytrade operations go direct via the Python SDK in `tt.py` — there is no MC
 }
 ```
 
-By default this is `false`, so `execute_trade`/`adjust_order` calls without `--live` always dry-run regardless of this setting, and calls with `--live` are rejected outright. To go live, set `enable_live_trading` to `true` in `config.json` — no restart of the Claude Code session is required, since `tt.py` reads `config.json` fresh on every invocation.
+By default this is `false`, so `execute_trade`/`adjust_order` calls without `--live` always dry-run regardless of this setting, and calls with `--live` are rejected outright. To go live, set `enable_live_trading` to `true` in `config.json` — no restart of the running session is required, since `tt.py` reads `config.json` fresh on every invocation.
 
 ---
 

@@ -17,7 +17,7 @@
   "entry_window_end": "14:30",
   "force_close_time": "15:45",
   "max_entries_per_day": 4,
-  "_max_entries_per_day_note": "Set to -1 to disable the hard cap and rely on buying power and AI judgment alone.",
+  "_max_entries_per_day_note": "Set to -1 to disable the hard cap and rely on buying power and the agent's judgment alone.",
   "max_concurrent_ics": 4,
 
   "entry_price_strategy_header": "===== Entry Price Strategy =====",

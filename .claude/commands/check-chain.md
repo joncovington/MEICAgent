@@ -1,4 +1,4 @@
-Verify that the tastytrade MCP option chain and delta-based strike selection are working for the relevant trading session, **for every symbol in `config.json`'s `symbols` list**. Tests today's expiration if before 16:00 ET on a trading day; otherwise tests the next trading day. Repeat Steps 2–4 below once per symbol; report one row per symbol in the final table plus an overall verdict.
+Verify that the tastytrade option chain and delta-based strike selection are working for the relevant trading session, **for every symbol in `config.json`'s `symbols` list**. Tests today's expiration if before 16:00 ET on a trading day; otherwise tests the next trading day. Repeat Steps 2–4 below once per symbol; report one row per symbol in the final table plus an overall verdict.
 
 ---
 

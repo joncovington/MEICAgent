@@ -8,7 +8,7 @@ Run `/meic-start` before 9:30 ET — it launches the dashboard and agent loop in
 /meic-start
 ```
 
-This launches the dashboard as a background process, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 09:45 ET) or after 15:30 ET, so starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** to verify the tastytrade MCP is live before any market assessment begins.
+This launches the dashboard as a background process, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 10:00 ET) or after `entry_window_end` (default 14:30 ET), and force-closes everything by `force_close_time` (default 15:45 ET), so starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** to verify the tastytrade broker session is live before any market assessment begins.
 
 To start components individually instead:
 
@@ -32,7 +32,7 @@ Open the MEICAgent folder in VS Code with the Claude Code extension (or run `cla
 /loop
 ```
 
-The agent runs every ~5 minutes. The tastytrade MCP gates all market-hours checks, so starting early or leaving it running after close is safe — it will not attempt to trade outside market hours. New entries are additionally blocked before `entry_window_start` (default 09:45 ET) to avoid open-bell volatility.
+The agent runs every ~2-30 minutes depending on session and open positions (see the loop cadence table in `CLAUDE.md`). The loop's own time gate (Step 2) skips all market-hours checks outside 09:30–15:55 ET, on weekends, or on a NYSE holiday, so starting early or leaving it running after close is safe — it will not attempt to trade outside market hours. New entries are additionally blocked before `entry_window_start` (default 10:00 ET) to avoid open-bell volatility.
 
 ---
 
@@ -79,7 +79,7 @@ The dashboard reads directly from `data/meic_trades.db` — no extra dependencie
 
 ## Verifying chain and strike selection
 
-Before the first live session, or after any tastytrade-mcp update, run:
+Before the first live session, or after any tastytrade SDK update, run:
 
 ```
 /check-chain
@@ -113,7 +113,7 @@ You can also trigger it manually at any time:
 
 ## Logs
 
-All loop actions are written to `logs/agent.log` as newline-delimited JSON. Each entry includes a timestamp, level (`INFO` or `WARN`), message, and optional structured data. Review `WARN` entries after EOD to identify conflict patterns and refine agent behavior.
+All loop actions are written to `logs/agent.log` as newline-delimited JSON via `python src/notify.py log_event --level <LEVEL>`. Each entry includes a timestamp, level (typically `INFO`, `WARN` for conflicts, or `CRITICAL` for escalated failures like a missed force-close on a non-cash-settled symbol), message, and optional structured data. Review `WARN`/`CRITICAL` entries after EOD to identify conflict patterns and refine agent behavior.
 
 The easiest way to watch the log live is the **Logs tab** in the dashboard (`http://localhost:5050`) — it tails the last 200 lines, color-codes WARN/ERROR entries, and auto-refreshes every 10 seconds.
 

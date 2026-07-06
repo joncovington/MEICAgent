@@ -27,7 +27,7 @@ def get_session() -> Session:
         if missing:
             raise CredentialError(
                 f"Missing credentials: {', '.join(missing)}. "
-                "Run `tastytrade-mcp secrets set` to store them."
+                "Run `python src/tt.py secrets_set` to store them."
             )
         client_secret = get_secret(CLIENT_SECRET)
         refresh_token = get_secret(REFRESH_TOKEN)

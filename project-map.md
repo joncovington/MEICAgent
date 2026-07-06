@@ -27,7 +27,7 @@ MEICAgent/
 
 ## Source Files (`src/`)
 
-### `tt.py` — Tastytrade Tool Interface (1,361 lines)
+### `tt.py` — Tastytrade Tool Interface (1,508 lines)
 The single entry point for all tastytrade operations. Run as `python src/tt.py <command>`.
 
 **Lookup flow**: every read command checks `stream_cache.db` first (tier 1 — streamer cache), then the REST result cache (tier 2 — within 10s), then opens a live DXLink connection (tier 3). The HTTP server in `streamer.py` intercepts calls via `_try_streamer_http()` when the streamer daemon is running, so quote/greeks latency is effectively zero.
@@ -65,6 +65,7 @@ The single entry point for all tastytrade operations. Run as `python src/tt.py <
 | `cmd_get_option_chain` | `get_option_chain` | Chain with optional greeks/quotes |
 | `cmd_get_strategies` | `get_strategies` | IC candidate with POP and credit |
 | `cmd_get_gex` | `get_gex` | GEX profile (requires OI in cache) |
+| `cmd_get_orb_range` | `get_orb_range` | Today's ORB high/low, captured by the streamer's `_track_orb` |
 | `cmd_get_working_orders` | `get_working_orders` | Live/unfilled orders |
 | `cmd_execute_trade` | `execute_trade` | Dry-run or live order |
 | `cmd_adjust_order` | `adjust_order` | Replace a working order |
@@ -80,7 +81,7 @@ The single entry point for all tastytrade operations. Run as `python src/tt.py <
 
 ---
 
-### `streamer.py` — DXLink Streamer Daemon (1,267 lines)
+### `streamer.py` — DXLink Streamer Daemon (1,390 lines)
 Persistent background process maintaining a WebSocket to the DXLink feed. Writes Quote, Greeks, Trade, and Summary (OI) events to `stream_cache.db`. Also runs an embedded HTTP server for low-latency command routing.
 
 **Startup**: `python src/streamer.py` (foreground) or `Start-Process python -ArgumentList 'src\streamer.py' -WindowStyle Hidden` (background).
@@ -92,14 +93,14 @@ Persistent background process maintaining a WebSocket to the DXLink feed. Writes
 | `_resolve_subscriptions(underlying)` | Builds `{Trade,Quote,Greeks,Summary: [syms]}` from open trades |
 | `_apply_subscriptions(streamer, state, subs, ...)` | Diffs current vs desired subscriptions, calls subscribe/unsubscribe |
 | `_poll_subscriptions(...)` | Re-runs resolve+apply every 30s |
-| `_atm_refresher(...)` | Fetches DTE-0 chain, maintains ±15-strike ATM window for Quote/Greeks/Summary |
-| `_gex_refresher(...)` | Maintains ±20-strike window for the GEX symbol (SPX by default) |
+| `_symbol_refresher(streamer, state, symbol, ...)` | One instance per traded symbol — fetches that symbol's 0DTE chain and maintains its ATM window (sized to the wider GEX requirement, so one subscription serves both entry strike selection and that symbol's own GEX profile — there is no separate GEX-only window) |
+| `_track_orb(state, symbol, price, ts)` | Tracks the 9:30–9:35 ET opening range from live Trade events per symbol and persists it to `orb_ranges` once the window closes |
 
 **Event listeners** (each an async task in `TaskGroup`)
 
 | Coroutine | Writes to |
 |---|---|
-| `_listen_trade` | `stream_trades` |
+| `_listen_trade` | `stream_trades`; also calls `_track_orb` per event |
 | `_listen_quote` | `stream_quotes` |
 | `_listen_greeks` | `stream_greeks` |
 | `_listen_summary` | `stream_oi` (open interest only) |
@@ -112,7 +113,7 @@ Tracks subscribed symbols per event type, ATM window center and symbols, GEX cha
 
 ---
 
-### `db.py` — Trade Database (527 lines)
+### `db.py` — Trade Database (665 lines)
 CLI interface to `data/meic_trades.db`. Run as `python src/db.py <command>`.
 
 **Schema**
@@ -143,35 +144,36 @@ CLI interface to `data/meic_trades.db`. Run as `python src/db.py <command>`.
 
 ---
 
-### `dashboard.py` — Intraday Dashboard (1,778 lines)
-Flask web app at `http://localhost:5050`. Provides live market monitoring and GEX visualization. Opens a browser tab on startup.
+### `dashboard.py` — Intraday Dashboard (2,371 lines)
+Flask web app at `http://localhost:5050`. Provides live market monitoring and GEX visualization. Opens a browser tab on startup, auto-refreshes every 30s.
 
-**Tabs / panels**
-- Account summary (NLV, buying power, open P&L)
-- Open positions with real-time greeks
-- Option chain viewer
-- IV skew chart
-- GEX analysis: net GEX bar chart, call wall / put wall / gamma flip markers, OI heatmap, volume profile
+**Tabs**
+- **Today** — multi-period P&L stats grid and today's trades table (entry time, strikes, wing width, per-spread credits, stop status, P&L)
+- **History** — NLV trend chart, session win rate breakdown, exit reason breakdown, avg P&L by IV rank bucket, all-time fee drag summary
+- **GEX** — sub-tabbed: net GEX by strike (OI-based and volume-based side by side) with call wall / put wall / zero-gamma markers and a live spot-price trail; IV skew curve; open-interest/volume-by-strike
+- **Logs** — tails `logs/agent.log`, color-coded by level, auto-refreshes every 10s
+- **Settings** — static pointer noting configuration is managed via `config.json`
 
 **Data flow**: reads `stream_cache.db` for low-latency data; falls back to REST via `tt.py` HTTP calls for chain data not yet in cache.
 
 ---
 
-### `session.py` — Session Management (35 lines)
-Singleton wrapper around `tastytrade.ProductionSession`. `get_session()` authenticates via OS keyring credentials (read by `credentials.py`) and caches the session for reuse. `reset_session()` forces re-authentication.
+### `session.py` — Session Management (40 lines)
+Thread-local wrapper around `tastytrade.Session` (OAuth2, `client_secret` + `refresh_token`). `get_session()` authenticates via OS keyring credentials (read by `credentials.py`) and caches the session per-thread — not a single process-wide singleton, since the SDK's `httpx.AsyncClient` binds to whichever event loop first uses it, and the streamer daemon runs DXLink and the REST poller on separate threads/loops. `reset_session()` clears the current thread's cached session, forcing re-authentication.
 
 ---
 
 ### `credentials.py` — Keyring Wrapper (65 lines)
-Reads and writes tastytrade credentials (`username`, `password`) to the OS keyring (Windows Credential Manager / DPAPI). Never touches files or environment variables.
+Reads and writes tastytrade OAuth2 credentials (`client_secret`, `refresh_token`, optional `account_number`) to the OS keyring under service name `tastytrade-mcp` (Windows Credential Manager / macOS Keychain / Linux Secret Service). Never touches files or environment variables.
 
 | Function | Purpose |
 |---|---|
 | `get_secret(key)` | Read one credential |
 | `set_secret(key, val)` | Write one credential |
-| `secrets_present()` | True if both username and password are set |
-| `missing_secrets()` | List of missing credential keys |
-| `secrets_status()` | Dict summary for CLI output |
+| `delete_secret(key)` | Remove one credential (no-op if already absent) |
+| `secrets_present()` | True if both required secrets (`client_secret`, `refresh_token`) are set — `account_number` is optional |
+| `missing_secrets()` | List of missing *required* credential keys |
+| `secrets_status()` | `{key: is_set}` for all known secrets (`client_secret`, `refresh_token`, `account_number`), for CLI output |
 
 ---
 
@@ -204,6 +206,7 @@ Key fields: `action`, `reasoning`, `open_trades_n`, `today_pnl`, `iv_rank`, `und
 | `stream_chain` | `(symbol, expiry)` | full chain JSON | ≤30s |
 | `stream_status` | `id=1` | pid, connected_since, subscribed counts | live |
 | `stream_rest_cache` | `key` | REST API response JSON | ≤10s |
+| `orb_ranges` | `(symbol, trade_date)` | ORB high/low captured 9:30–9:35 ET | one row per symbol per day |
 
 ---
 

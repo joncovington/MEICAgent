@@ -28,7 +28,9 @@ Any width where `width × dollar_multiplier > available buying power` is elimina
 
 ---
 
-## Entry sessions
+## Session classification
+
+Every loop iteration classifies the current time into one of these labels (used for entry judgment, stop tightening, and regime detection — not just entries):
 
 | Window | Label | Notes |
 |---|---|---|
@@ -36,8 +38,8 @@ Any width where `width × dollar_multiplier > available buying power` is elimina
 | 10:00–11:30 | `prime` | Preferred entry window |
 | 11:30–13:00 | `midday` | Generally good conditions |
 | 13:00–14:30 | `afternoon` | Less time remaining; weigh credit vs. time risk |
-| 14:30–15:30 | `late` | Very limited time; weigh credit, open exposure, and IV carefully |
-| After 15:30 | — | No new entries |
+| 14:30–15:30 | `late` | Applies to stop tightening and existing positions; new IC entries are already hard-blocked here by `entry_window_end` (default 14:30) |
+| After 15:30 | — | No new entries; force-close by `force_close_time` (default 15:45) regardless of symbol |
 
 ---
 
@@ -58,31 +60,32 @@ When multiple conditions apply, the largest applicable minimum wins per side. If
 
 ## Entry price strategy
 
-By default the agent submits at the **natural bid** — the price buyers are actively bidding for the IC combo — which is always within the CBOE Complex Order Book's acceptable price range. Submitting at mid is consistently rejected ("Complex_order_outside_acceptable_price_range") because the DXLink quote snapshot lags the exchange's real-time NBBO.
+The **natural bid** — the price buyers are actively bidding for the IC combo — is always within the CBOE Complex Order Book's acceptable price range, and is the fallback for every other strategy below. Submitting at a naively-computed mid can be rejected ("Complex_order_outside_acceptable_price_range") because a stale quote snapshot can lag the exchange's real-time NBBO; the `"mid"` strategy guards against this with a spread-width gate (`mid_spread_gate`) rather than always trying mid first and eating the wait.
 
-Two optional strategies can attempt to capture price improvement above the natural bid. Set `entry_price_strategy` in `config.json`:
+Several strategies can attempt to capture price improvement above the natural bid. Set `entry_price_strategy` in `config.json`:
 
 | Value | Behavior |
 |---|---|
-| `"natural_bid"` | Always submit at natural bid. Default and safest. |
+| `"mid"` | Use the streaming mid price as a Day limit, waiting up to `mid_improve_wait_seconds` before falling back to natural bid. Skipped in favor of natural bid if the average per-leg spread exceeds `mid_spread_gate` (too wide to expect a mid fill). |
+| `"natural_bid"` | Always submit at natural bid. Safest, no price-improvement attempt. |
 | `"ioc_step"` | Try natural bid + each increment in `ioc_step_increments` as IOC orders, then fall back to natural bid as a Day order. |
 | `"day_improve"` | Submit a Day limit at natural bid + `day_improve_amount`, wait `day_improve_wait_seconds`, cancel-replace at natural bid if unfilled. |
-| `"auto"` | Agent chooses per-iteration: `ioc_step` in volatile/late sessions, `day_improve` in calm midday, `natural_bid` when time is short or credit is thin. |
+| `"auto"` (default) | Agent chooses per-iteration by session, spread width, and IV rank rather than always trying one strategy first. |
 
-**Note**: Whether prices even slightly above natural bid pass the CBOE COB check is empirically unknown. An `ioc_step` attempt that would normally just sit unfilled may instead be rejected outright — the agent treats this the same as a miss and steps to the next increment. A few live sessions with `ioc_step` enabled will confirm whether improvement is achievable.
+**Note**: Whether prices even slightly above natural bid pass the CBOE COB check varies by session. An `ioc_step` attempt that would normally just sit unfilled may instead be rejected outright — the agent treats this the same as a miss and steps to the next increment.
 
 ---
 
 ## Stop management
 
-Each IC gets two **DAY stop-limit orders** — one for the put spread, one for the call spread. Both are sized as a fraction of the full IC net credit:
+Tastytrade does not support exchange-level multi-leg stop orders for combo ICs, so stops are **software-monitored** — the loop checks each open trade's put spread and call spread cost every iteration (120s cadence while positions are open) rather than relying on a resting exchange order. With `per_side_stop_management` enabled (default), the call spread and put spread are managed independently: a stopped side leaves the untouched side running.
 
 ```
-stop_trigger = net_credit × stop_trigger_ratio   (default 0.90)
-stop_limit   = net_credit × stop_limit_ratio     (default 0.95)
+per-side stop fires when that side's cost reaches:  stop_trigger_ratio × net_credit   (default 0.95, i.e. per_side_stop_trigger = full_credit)
+closing limit price:  (short_ask − long_bid) × stop_limit_ratio                        (default 1.02 — prices slightly past the crossing price so it stays marketable)
 ```
 
-At these levels, closing the stopped spread costs approximately the full IC credit, leaving the other spread to expire worthless at near break-even.
+At these levels, closing the stopped spread costs approximately the full IC credit, leaving the other spread to continue toward expiration or its own stop/profit target.
 
 Stops are tightened (never loosened) by AI judgment as conditions change. Triggers for tightening include:
 
@@ -149,7 +152,7 @@ When signals conflict or inputs are ambiguous, the agent never halts. It applies
 | Conflicting stop tightening signals | Leave current stop in place |
 | Uncertain whether to force-close | Close it |
 | Uncertain post-stop action | Leave the DAY stop working |
-| MCP returns retryable error | Skip iteration (INFO log); retry automatically next wakeup |
-| MCP returns non-retryable error | Take no trading action; log WARN with raw response |
+| `tt.py` command returns a retryable error | Skip iteration (INFO log); retry automatically next wakeup |
+| `tt.py` command returns a non-retryable error | Take no trading action; log WARN with raw response |
 
 All conflicts are logged as `WARN` in `logs/agent.log` for post-session review.

@@ -268,6 +268,8 @@ _WINDOW_STRIKE_COUNT = 20   # strikes each side of center (~40 strikes × 2 type
 _WINDOW_REFRESH_PTS  = 1.0  # re-center when the symbol's underlying moves this many points
 _WINDOW_POLL_S       = 5.0  # how often to check whether a re-center is due
 
+_NOMINAL_WING_PRICE = 0.01  # fallback price for a long wing leg with no quote at all
+
 # Shared state for the HTTP server thread
 _loop: asyncio.AbstractEventLoop | None = None           # DXLink event loop
 _rest_loop: asyncio.AbstractEventLoop | None = None      # dedicated REST loop
@@ -1124,22 +1126,38 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
             leg_syms = [l.get("streamer_symbol") for l in (sp, lp, sc, lc) if l.get("streamer_symbol")]
             ph2 = ",".join("?" * len(leg_syms))
             quotes_map = {}
+            stale_quotes_map = {}
             for r in conn.execute(
                 f"SELECT symbol, bid, ask, mid, updated_at FROM stream_quotes WHERE symbol IN ({ph2})",
                 leg_syms,
             ).fetchall():
+                stale_quotes_map[r["symbol"]] = r["mid"]
                 if (now - r["updated_at"]) < 10:
                     quotes_map[r["symbol"]] = r["mid"]
 
             mids = [quotes_map.get(l.get("streamer_symbol")) for l in (sp, lp, sc, lc)]
+
+            # Long wing legs (bought for protection, not sold for credit) trade so rarely
+            # a fresh quote often never arrives — fall back to the last-known price (even
+            # minutes stale) or a nominal $0.01, since a contract nobody trades isn't
+            # repricing meaningfully anyway. Short legs keep the strict freshness check.
+            long_wing_fallback_used = False
+            for idx, leg in ((1, lp), (3, lc)):
+                if mids[idx] is None:
+                    leg_sym = leg.get("streamer_symbol")
+                    mids[idx] = stale_quotes_map.get(leg_sym) if leg_sym else None
+                    if mids[idx] is None:
+                        mids[idx] = _NOMINAL_WING_PRICE
+                    long_wing_fallback_used = True
+
             net_credit = None
-            if all(m is not None for m in mids):
+            if mids[0] is not None and mids[2] is not None:
                 net_credit = round(float(mids[0]) + float(mids[2]) - float(mids[1]) - float(mids[3]), 4)
             mult = float(sp.get("shares_per_contract") or 100)
             dte = (_date.fromisoformat(expiration) - _date.today()).days
 
             def _leg(o, mid):
-                return {**o, "mid": quotes_map.get(o.get("streamer_symbol"))}
+                return {**o, "mid": mid}
 
             return {
                 "ok": True, "symbol": sym, "strategy": "iron_condor",
@@ -1148,7 +1166,8 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
                 "net_credit": net_credit,
                 "contract_multiplier": mult,
                 "net_credit_per_contract": round(net_credit * mult, 2) if net_credit else None,
-                "quotes_complete": all(m is not None for m in mids),
+                "quotes_complete": mids[0] is not None and mids[2] is not None,
+                "long_wing_fallback_used": long_wing_fallback_used,
                 "greeks_used_for_strike_selection": bool(greeks_map),
                 "source": "stream_cache",
                 "legs": {

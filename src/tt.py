@@ -192,6 +192,33 @@ def _cache_get_quotes(symbols: list[str]) -> dict[str, dict]:
     return out
 
 
+_NOMINAL_WING_PRICE = 0.01  # fallback price for a long wing leg with no quote at all
+
+
+def _cache_get_quotes_any_age(symbols: list[str]) -> dict[str, dict]:
+    """Like _cache_get_quotes but ignores staleness — for deep-OTM long wing legs that
+    trade so rarely their last quote can be minutes old even though it's still the best
+    information available (a leg nobody is trading isn't repricing meaningfully anyway).
+    """
+    conn = _cache_conn()
+    if conn is None:
+        return {}
+    out: dict[str, dict] = {}
+    try:
+        placeholders = ",".join(["?" for _ in symbols])
+        rows = conn.execute(
+            f"SELECT symbol, bid, ask, mid FROM stream_quotes WHERE symbol IN ({placeholders})",
+            symbols,
+        ).fetchall()
+        for row in rows:
+            out[row["symbol"]] = {"bid": row["bid"], "ask": row["ask"], "mid": row["mid"]}
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return out
+
+
 def _cache_get_chain(expiration: str, symbol: str | None = None) -> list | None:
     """Return cached option chain for a specific expiration date, or None if stale/missing.
 
@@ -795,6 +822,29 @@ async def cmd_get_strategies(args) -> dict:
         short_call_mid = _mid(short_call)
         long_call_mid = _mid(long_call)
 
+        # Long wing legs (bought for protection, not sold for credit) trade so rarely
+        # that a fresh quote often never arrives — their last-known price (even minutes
+        # stale) or a nominal $0.01 is a fine stand-in, since a contract nobody trades
+        # isn't repricing meaningfully anyway. Short legs keep the strict fresh-quote
+        # requirement below since real fill/premium accuracy matters there.
+        long_wing_fallback_used = False
+        if long_put_mid is None or long_call_mid is None:
+            stale_syms = [s for leg, mid in ((long_put, long_put_mid), (long_call, long_call_mid))
+                          if mid is None and (s := getattr(leg, "streamer_symbol", None))]
+            stale_q = _cache_get_quotes_any_age(stale_syms) if stale_syms else {}
+            if long_put_mid is None:
+                sym = getattr(long_put, "streamer_symbol", None)
+                q = stale_q.get(sym) if sym else None
+                bid, ask = (_num(q.get("bid")), _num(q.get("ask"))) if q else (None, None)
+                long_put_mid = round((bid + ask) / 2, 4) if bid is not None and ask is not None else _NOMINAL_WING_PRICE
+                long_wing_fallback_used = True
+            if long_call_mid is None:
+                sym = getattr(long_call, "streamer_symbol", None)
+                q = stale_q.get(sym) if sym else None
+                bid, ask = (_num(q.get("bid")), _num(q.get("ask"))) if q else (None, None)
+                long_call_mid = round((bid + ask) / 2, 4) if bid is not None and ask is not None else _NOMINAL_WING_PRICE
+                long_wing_fallback_used = True
+
         mids = [short_put_mid, long_put_mid, short_call_mid, long_call_mid]
         net_credit = None
         multiplier = float(getattr(short_put, "shares_per_contract", None) or
@@ -819,7 +869,8 @@ async def cmd_get_strategies(args) -> dict:
             "net_credit": net_credit,
             "contract_multiplier": multiplier,
             "net_credit_per_contract": round(net_credit * multiplier, 2) if net_credit is not None else None,
-            "quotes_complete": all(m is not None for m in mids),
+            "quotes_complete": short_put_mid is not None and short_call_mid is not None,
+            "long_wing_fallback_used": long_wing_fallback_used,
             "greeks_used_for_strike_selection": greeks_used,
             "legs": {
                 "short_put": _leg(short_put, short_put_mid),

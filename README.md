@@ -75,8 +75,6 @@ See [docs/setup.md](docs/setup.md) for the full setup walkthrough.
 MEICAgent/
 ├── CLAUDE.md                        # Agent operational brain (loaded every loop iteration)
 ├── config.example.json              # Config template — copy to config.json
-├── .mcp.json                        # MCP server definition (agentmemory only — tastytrade
-│                                     #   connects via direct SDK below, not MCP)
 ├── src/
 │   ├── tt.py                        # tastytrade CLI — get_quote, get_strategies, execute_trade, etc.
 │   ├── streamer.py                  # Persistent DXLink streaming daemon (live quotes/greeks/OI/volume)

@@ -17,7 +17,6 @@ MEICAgent/
 ├── docs/                   Operator docs (setup, strategy, operating guides)
 ├── research/               Trading research notes (GEX, 0DTE strategies, covered calls)
 ├── .claude/commands/       Project slash commands (skills invoked during the agent loop)
-├── .agents/skills/         agentmemory skill definitions (auto-installed, gitignored)
 ├── config.json             Active runtime configuration (see CLAUDE.md config table)
 ├── config.example.json     Annotated template
 ├── CLAUDE.md               Agent operating instructions and strategy reference (primary doc)

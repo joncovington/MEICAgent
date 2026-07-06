@@ -67,7 +67,7 @@ This creates `data/meic_trades.db` (SQLite, WAL mode). Safe to run multiple time
 
 ### 6. Enable live trading (when ready)
 
-Tastytrade operations go direct via the Python SDK in `tt.py` — there is no MCP server involved (`.mcp.json` at the project root only configures the unrelated `agentmemory` server, if you've set that up). Live order submission is gated by a single `config.json` key, checked by `tt.py`'s `_live_trading_enabled()` before any `execute_trade`/`adjust_order`/`close_position` call:
+Tastytrade operations go direct via the Python SDK in `tt.py` — there is no MCP server involved. Live order submission is gated by a single `config.json` key, checked by `tt.py`'s `_live_trading_enabled()` before any `execute_trade`/`adjust_order`/`close_position` call:
 
 ```json
 {

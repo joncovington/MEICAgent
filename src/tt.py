@@ -29,7 +29,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -1217,6 +1217,34 @@ async def cmd_get_gex(args) -> dict:
         return _error(exc)
 
 
+def cmd_get_orb_range(args) -> dict:
+    """Read the day's ORB (Opening Range Breakout) high/low, captured by the streamer
+    from live Trade events during 9:30-9:35 ET (see streamer.py's _track_orb) rather than
+    by the AI loop's own iterations, which aren't guaranteed to land inside that window."""
+    import pytz
+    symbol = args.symbol.strip().upper()
+    et_today = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+    conn = _cache_conn()
+    if conn is None:
+        return {"ok": False, "error": "stream cache not found — is the streamer running?"}
+    try:
+        row = conn.execute(
+            "SELECT orb_high, orb_low, captured_at FROM orb_ranges WHERE symbol = ? AND trade_date = ?",
+            (symbol, et_today),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {"ok": False, "error": "not yet captured — before 9:35 ET, or the streamer wasn't running through the 9:30-9:35 window today"}
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "orb_high": row["orb_high"],
+        "orb_low": row["orb_low"],
+        "captured_at": row["captured_at"],
+    }
+
+
 def cmd_stream_status(_args) -> dict:
     # os.kill(pid, 0) is unreliable on Windows (raises SystemError for some
     # process states) — reuse streamer.py's cross-platform _running_pid(),
@@ -1261,6 +1289,12 @@ def cmd_stream_status(_args) -> dict:
         # which persisted 34+ hours across restarts before manual diagnosis).
         # Uses the numeric per-table ages above rather than the TEXT
         # last_event_at column (which is an ISO string, not an epoch float).
+        # Each entry in `ages` is already `now - MAX(updated_at)` for its own
+        # table (computed above, per table) -- taking min() here correctly
+        # picks the freshest feed's age. (Not the same shape as the bug fixed
+        # earlier in streamer.py's own --status output, which took min/max of
+        # raw *timestamps* before converting to age -- this code was already
+        # doing it the right way round.)
         stale_age_s = min(ages) if ages else None
         stale = running and (stale_age_s is None or stale_age_s > 600)
         result["stale_warning"] = stale
@@ -1413,6 +1447,9 @@ def main():
 
     sub.add_parser("stream_status")
 
+    p_orb = sub.add_parser("get_orb_range")
+    p_orb.add_argument("--symbol", required=True, help="Trading symbol (e.g. XSP)")
+
     p_ss = sub.add_parser("stream_subscribe")
     p_ss.add_argument("--symbols", nargs="+", required=True, help="Streamer symbols to warm up in cache")
     p_ss.add_argument("--timeout", type=float, default=6.0)
@@ -1424,6 +1461,7 @@ def main():
         "secrets_status": cmd_secrets_status,
         "secrets_set":    cmd_secrets_set,
         "stream_status":  cmd_stream_status,
+        "get_orb_range":  cmd_get_orb_range,
     }
     if args.command in sync_dispatch:
         _out(sync_dispatch[args.command](args))

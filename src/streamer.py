@@ -35,8 +35,12 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytz
+
 # Allow running as `python src/streamer.py` from the project root.
 sys.path.insert(0, os.path.dirname(__file__))
+
+_ET = pytz.timezone("America/New_York")
 
 from session import get_session
 
@@ -126,6 +130,14 @@ CREATE TABLE IF NOT EXISTS stream_status (
     last_event_at       TEXT,
     subscribed_symbols  INTEGER DEFAULT 0,
     reconnect_count     INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS orb_ranges (
+    symbol      TEXT NOT NULL,
+    trade_date  TEXT NOT NULL,
+    orb_high    REAL,
+    orb_low     REAL,
+    captured_at REAL,
+    PRIMARY KEY (symbol, trade_date)
 );
 """
 
@@ -306,6 +318,13 @@ class _State:
         # commits instead; _COMMIT_BATCH_INTERVAL_S bounds the extra staleness.
         self.pending_writes = 0
         self.last_commit_at = 0.0
+        # ORB (Opening Range Breakout) capture — tracked here rather than by the AI loop's own
+        # iterations, since the loop's cadence isn't guaranteed to land inside the 9:30-9:35 ET
+        # window (missed entirely on 2026-07-02 because early iterations were pre-market
+        # skips), while this streamer runs continuously and sees every live Trade event.
+        self.orb_high: dict[str, float] = {}
+        self.orb_low: dict[str, float] = {}
+        self.orb_captured: set[str] = set()  # symbols already persisted to orb_ranges today
 
 
 _COMMIT_BATCH_INTERVAL_S = 0.5
@@ -428,8 +447,42 @@ async def _listen_trade(streamer, state: _State, Trade) -> None:
             )
             _maybe_commit(state)
             state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            _track_orb(state, event.event_symbol, _f(event.price), ts)
         except Exception as exc:
             logger.warning("Trade write error: %s", exc)
+
+
+def _track_orb(state: _State, symbol: str, price: float | None, ts: float) -> None:
+    """Track the 9:30-9:35 ET opening range from live Trade events and persist it once the
+    window closes. Runs on every Trade tick for a traded underlying (not just periodically),
+    so it never misses an intrabar high/low the way a slower polling check would.
+    """
+    if price is None or symbol not in state.symbols:
+        return
+    et_now = datetime.fromtimestamp(ts, tz=_ET)
+    window_start = et_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    window_end = et_now.replace(hour=9, minute=35, second=0, microsecond=0)
+    if window_start <= et_now < window_end:
+        h = state.orb_high.get(symbol)
+        l = state.orb_low.get(symbol)
+        state.orb_high[symbol] = price if h is None else max(h, price)
+        state.orb_low[symbol] = price if l is None else min(l, price)
+        return
+    if et_now >= window_end and symbol not in state.orb_captured:
+        h, l = state.orb_high.get(symbol), state.orb_low.get(symbol)
+        if h is None or l is None:
+            return  # streamer wasn't running during the window today — nothing to persist
+        try:
+            state.conn.execute(
+                "INSERT INTO orb_ranges (symbol, trade_date, orb_high, orb_low, captured_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(symbol, trade_date) DO NOTHING",
+                (symbol, et_now.strftime("%Y-%m-%d"), h, l, ts),
+            )
+            state.conn.commit()
+            state.orb_captured.add(symbol)
+            logger.info("[%s] ORB range captured: high=%.2f low=%.2f", symbol, h, l)
+        except Exception as exc:
+            logger.warning("[%s] ORB persist error: %s", symbol, exc)
 
 
 async def _listen_quote(streamer, state: _State, Quote) -> None:
@@ -568,32 +621,6 @@ def _write_chain_to_cache(conn: sqlite3.Connection, option_map: dict) -> None:
     logger.info("Cached %d option chain entries", len(rows))
 
 
-_SUBSCRIBE_CHUNK_SIZE = 20  # see _chunked_subscribe for why
-
-
-def _chunked(items: list, size: int):
-    for i in range(0, len(items), size):
-        yield items[i:i + size]
-
-
-async def _chunked_subscribe(streamer, cls, symbols: list[str], unsubscribe: bool = False) -> None:
-    """Subscribe/unsubscribe in batches of _SUBSCRIBE_CHUNK_SIZE rather than one giant call.
-
-    Root cause of two silent-stall incidents this week: dxFeed's server silently switches a
-    channel from the requested COMPACT data format to FULL (object-per-event instead of a
-    flat array) when a single subscription burst is large enough — observed live right after
-    a fresh window re-center added 82 symbols to the Greeks channel in one call. The installed
-    tastytrade SDK's DXLinkStreamer._map_message only handles COMPACT format; a FULL-format
-    message crashes it with `KeyError: 0` (message[0] is a dict, not the expected str/list),
-    taking down the whole persistent connection's TaskGroup — reconnect happens, but any window
-    re-center this large repeats the trigger. Filed upstream: github.com/tastyware/tastytrade.
-    Keeping each burst small enough avoids ever tripping the server's format-switch heuristic.
-    """
-    fn = streamer.unsubscribe if unsubscribe else streamer.subscribe
-    for chunk in _chunked(symbols, _SUBSCRIBE_CHUNK_SIZE):
-        await fn(cls, chunk)
-
-
 def _atm_window_syms(option_map: dict, center: float, strike_count: int) -> list[str]:
     """Return streamer symbols within strike_count strikes of center on each side."""
     strikes = sorted({float(o.strike_price) for o in option_map.values()})
@@ -654,20 +681,20 @@ async def _symbol_refresher(streamer, state: _State, symbol: str, Quote, Greeks,
                 try:
                     if add:
                         add_list = list(add)
-                        await _chunked_subscribe(streamer, Quote, add_list)
-                        await _chunked_subscribe(streamer, Greeks, add_list)
-                        await _chunked_subscribe(streamer, Summary, add_list)
-                        await _chunked_subscribe(streamer, Trade, add_list)
+                        await streamer.subscribe(Quote, add_list)
+                        await streamer.subscribe(Greeks, add_list)
+                        await streamer.subscribe(Summary, add_list)
+                        await streamer.subscribe(Trade, add_list)
                     if remove:
                         # Only unsubscribe if not also needed by an open IC leg
                         open_legs = set(_open_trade_streamer_symbols())
                         safe_remove = remove - open_legs
                         if safe_remove:
                             safe_remove_list = list(safe_remove)
-                            await _chunked_subscribe(streamer, Quote, safe_remove_list, unsubscribe=True)
-                            await _chunked_subscribe(streamer, Greeks, safe_remove_list, unsubscribe=True)
-                            await _chunked_subscribe(streamer, Summary, safe_remove_list, unsubscribe=True)
-                            await _chunked_subscribe(streamer, Trade, safe_remove_list, unsubscribe=True)
+                            await streamer.unsubscribe(Quote, safe_remove_list)
+                            await streamer.unsubscribe(Greeks, safe_remove_list)
+                            await streamer.unsubscribe(Summary, safe_remove_list)
+                            await streamer.unsubscribe(Trade, safe_remove_list)
                     state.window_syms[symbol] = new_syms
                     _upsert_status(state.conn, subscribed_symbols=_total_subscribed(state))
                     logger.info(

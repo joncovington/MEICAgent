@@ -94,7 +94,7 @@ def test_log_loop_action_stores_symbol(db_path):
     args = argparse.Namespace(
         symbol="XSP", action="entry", reasoning="test", market_context="{}",
         iv_rank=0.4, session_quality="prime", underlying_price=600.0,
-        open_trades=1, today_count=1, today_pnl=0.5,
+        open_trades=1, today_count=1, today_pnl=0.5, duration_ms=None,
     )
     db.cmd_log_loop_action(args)
 
@@ -111,7 +111,7 @@ def test_log_loop_action_symbol_none_for_iteration_summary(db_path):
     args = argparse.Namespace(
         symbol=None, action="iteration_summary", reasoning="", market_context="{}",
         iv_rank=None, session_quality=None, underlying_price=None,
-        open_trades=None, today_count=None, today_pnl=None,
+        open_trades=None, today_count=None, today_pnl=None, duration_ms=None,
     )
     db.cmd_log_loop_action(args)
 
@@ -120,6 +120,48 @@ def test_log_loop_action_symbol_none_for_iteration_summary(db_path):
     row = conn.execute("SELECT symbol FROM loop_log ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
     assert row["symbol"] is None
+
+
+def _log_action(symbol, action, duration_ms):
+    db.cmd_log_loop_action(argparse.Namespace(
+        symbol=symbol, action=action, reasoning="", market_context="{}",
+        iv_rank=None, session_quality=None, underlying_price=None,
+        open_trades=None, today_count=None, today_pnl=None, duration_ms=duration_ms,
+    ))
+
+
+def test_log_loop_action_stores_duration_ms(db_path):
+    _log_action(None, "timing_stop_management", 842)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT duration_ms FROM loop_log ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    assert row["duration_ms"] == 842
+
+
+def test_get_step_timing_summarizes_by_action(db_path, capsys):
+    _log_action(None, "timing_stop_management", 800)
+    _log_action(None, "timing_stop_management", 1200)
+    _log_action("XSP", "timing_entry_evaluation", 3000)
+
+    db.cmd_get_step_timing(argparse.Namespace(action=None, symbol=None, lookback_days=None))
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert out["ok"] is True
+    assert out["by_action"]["timing_stop_management"]["sample_size"] == 2
+    assert out["by_action"]["timing_stop_management"]["avg_ms"] == 1000.0
+    assert out["by_action"]["timing_entry_evaluation"]["sample_size"] == 1
+
+
+def test_get_step_timing_filters_by_action(db_path, capsys):
+    _log_action(None, "timing_stop_management", 500)
+    _log_action("SPX", "timing_entry_evaluation", 2500)
+
+    db.cmd_get_step_timing(argparse.Namespace(action="timing_entry_evaluation", symbol=None, lookback_days=None))
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert list(out["by_action"].keys()) == ["timing_entry_evaluation"]
 
 
 # ── --symbol filters on account-wide read commands ──────────────────────────

@@ -328,6 +328,48 @@ def cmd_get_fee_estimate(args):
     })
 
 
+def cmd_get_step_timing(args):
+    """Summarize logged step latency (see `timing_stop_management` / `timing_entry_evaluation`
+    rows written by log_loop_action) so entry-evaluation vs stop-management wall-clock cost can
+    actually be compared, rather than inferred from the loop_log row timestamps (which cluster
+    within milliseconds of each other since rows are written back-to-back at logging time, not
+    spread across the work each step does).
+    """
+    conn = _connect()
+    where = ["duration_ms IS NOT NULL"]
+    params: list = []
+    if args.action:
+        where.append("action = ?")
+        params.append(args.action)
+    if args.symbol:
+        where.append("symbol = ?")
+        params.append(args.symbol.upper())
+    if args.lookback_days:
+        where.append("loop_date >= date('now', ?)")
+        params.append(f"-{args.lookback_days} days")
+    rows = conn.execute(
+        f"SELECT action, symbol, duration_ms FROM loop_log WHERE {' AND '.join(where)} "
+        "ORDER BY id DESC",
+        params,
+    ).fetchall()
+    conn.close()
+
+    by_action: dict[str, list[int]] = {}
+    for r in rows:
+        by_action.setdefault(r["action"], []).append(r["duration_ms"])
+
+    summary = {}
+    for action, durations in by_action.items():
+        summary[action] = {
+            "sample_size": len(durations),
+            "avg_ms": round(sum(durations) / len(durations), 1),
+            "min_ms": min(durations),
+            "max_ms": max(durations),
+        }
+
+    _out({"ok": True, "sample_size": len(rows), "by_action": summary})
+
+
 # ---------------------------------------------------------------------------
 # Write commands
 # ---------------------------------------------------------------------------
@@ -487,6 +529,8 @@ def cmd_log_loop_action(args):
         ctx["today_count"] = args.today_count
     if args.today_pnl is not None:
         ctx["today_pnl"] = args.today_pnl
+    if args.duration_ms is not None:
+        ctx["duration_ms"] = args.duration_ms
     conn = _connect()
     conn.execute(
         """INSERT INTO loop_log
@@ -586,6 +630,12 @@ def main():
     p_fee.add_argument("--symbol", required=True)
     p_fee.add_argument("--lookback", default=20, type=int)
 
+    p_timing = sub.add_parser("get_step_timing")
+    p_timing.add_argument("--action", default=None,
+                           help="Filter to one action, e.g. timing_stop_management or timing_entry_evaluation")
+    p_timing.add_argument("--symbol", default=None)
+    p_timing.add_argument("--lookback_days", default=None, type=int)
+
     p_save = sub.add_parser("save_trade")
     p_save.add_argument("--data", required=True)
 
@@ -633,6 +683,8 @@ def main():
     p_log.add_argument("--open_trades", default=None, type=int)
     p_log.add_argument("--today_count", default=None, type=int)
     p_log.add_argument("--today_pnl", default=None, type=float)
+    p_log.add_argument("--duration_ms", default=None, type=int,
+                        help="Elapsed wall-clock milliseconds for the step this row represents (e.g. stop management or one symbol's entry evaluation)")
 
     args = parser.parse_args()
 
@@ -645,6 +697,7 @@ def main():
         "get_session_init": cmd_get_session_init,
         "set_session_init": cmd_set_session_init,
         "get_fee_estimate": cmd_get_fee_estimate,
+        "get_step_timing": cmd_get_step_timing,
         "save_trade": cmd_save_trade,
         "update_trade": cmd_update_trade,
         "save_daily_summary": cmd_save_daily_summary,

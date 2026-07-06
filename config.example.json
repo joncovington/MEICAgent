@@ -11,7 +11,7 @@
 
   "trading_window_and_caps_header": "===== Trading Window & Daily Caps =====",
   "enable_live_trading": false,
-  "_enable_live_trading_note": "Set to true to allow execute_trade/adjust_order/close_position to submit real orders. Requires tastytrade OAuth credentials in the OS keyring (via tastytrade-mcp secrets set). Left false in this example so a fresh setup starts in dry-run.",
+  "_enable_live_trading_note": "Set to true to allow execute_trade/adjust_order/close_position to submit real orders. Requires tastytrade OAuth credentials in the OS keyring (via `python src/tt.py secrets_set`). Left false in this example so a fresh setup starts in dry-run.",
   "loop_interval_minutes": 5,
   "entry_window_start": "10:00",
   "entry_window_end": "14:30",

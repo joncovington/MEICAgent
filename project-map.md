@@ -164,7 +164,7 @@ Thread-local wrapper around `tastytrade.Session` (OAuth2, `client_secret` + `ref
 ---
 
 ### `credentials.py` — Keyring Wrapper (65 lines)
-Reads and writes tastytrade OAuth2 credentials (`client_secret`, `refresh_token`, optional `account_number`) to the OS keyring under service name `tastytrade-mcp` (Windows Credential Manager / macOS Keychain / Linux Secret Service). Never touches files or environment variables.
+Reads and writes tastytrade OAuth2 credentials (`client_secret`, `refresh_token`, optional `account_number`) to the OS keyring under service name `meicagent` (Windows Credential Manager / macOS Keychain / Linux Secret Service). Reads fall back to the pre-rename `tastytrade-mcp` service name if a key isn't found under `meicagent`, so credentials stored before the rename keep working without re-entry — writes always go to `meicagent`. Never touches files or environment variables.
 
 | Function | Purpose |
 |---|---|

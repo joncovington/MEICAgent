@@ -474,7 +474,7 @@ async def cmd_get_connection_status(_args) -> dict:
     }
     if not status["credentials_present"]:
         status["ok"] = False
-        status["hint"] = "Run `tastytrade-mcp secrets set` to store credentials."
+        status["hint"] = "Run `python src/tt.py secrets_set` to store credentials."
         return status
     try:
         from tastytrade.account import Account

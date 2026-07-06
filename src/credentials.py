@@ -5,7 +5,8 @@ from __future__ import annotations
 import keyring
 import keyring.errors
 
-SERVICE_NAME = "tastytrade-mcp"
+SERVICE_NAME = "meicagent"
+_LEGACY_SERVICE_NAME = "tastytrade-mcp"  # read-only fallback for credentials stored before the rename
 
 CLIENT_SECRET = "client_secret"
 REFRESH_TOKEN = "refresh_token"
@@ -27,11 +28,20 @@ def _entry(key: str) -> str:
 
 def get_secret(key: str) -> str | None:
     try:
-        return keyring.get_password(SERVICE_NAME, _entry(key))
+        value = keyring.get_password(SERVICE_NAME, _entry(key))
     except keyring.errors.NoKeyringError as exc:
         raise CredentialError("No keyring backend available.") from exc
     except keyring.errors.KeyringError as exc:
         raise CredentialError(f"Keyring read failed: {exc}") from exc
+    if value is not None:
+        return value
+    # Fall back to the pre-rename service name so existing stored credentials
+    # keep working without forcing a re-entry via secrets_set. Never written
+    # to going forward — set_secret only writes under SERVICE_NAME.
+    try:
+        return keyring.get_password(_LEGACY_SERVICE_NAME, _entry(key))
+    except keyring.errors.KeyringError:
+        return None
 
 
 def secrets_present() -> bool:

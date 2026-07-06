@@ -23,7 +23,7 @@ To update a single key only:
 python src/tt.py secrets_set --keys refresh_token
 ```
 
-Tell the user: credentials are stored under service name `tastytrade-mcp` in the OS keyring, matching the layout used by tastytrade-mcp so existing secrets are reused automatically.
+Tell the user: credentials are stored under service name `meicagent` in the OS keyring. `secrets_set`/`get_secret` also fall back to reading the older `tastytrade-mcp` service name (read-only) so anyone with credentials already stored under it don't need to re-enter them — new writes always go to `meicagent`.
 
 ## Step 3 — Verify connection
 

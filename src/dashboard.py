@@ -496,12 +496,31 @@ def _load_symbol() -> str:
 
 
 def _compute_zero_gamma(series: list[dict]) -> float | None:
-    """Interpolate the strike where cumulative net GEX crosses zero."""
-    for i in range(len(series) - 1):
-        a, b = series[i], series[i + 1]
-        if a["net_gex"] != 0 and b["net_gex"] != 0 and a["net_gex"] * b["net_gex"] < 0:
-            t = abs(a["net_gex"]) / (abs(a["net_gex"]) + abs(b["net_gex"]))
-            return round(a["strike"] + t * (b["strike"] - a["strike"]), 2)
+    """Interpolate the price level where CUMULATIVE net GEX (summed strike by
+    strike, ascending -- `series` is already sorted this way) crosses zero.
+    Must match tt.py's `_compute_gex`/`gamma_flip` algorithm exactly.
+
+    This previously checked for a sign change between two ADJACENT strikes'
+    individual net_gex values instead of the running cumulative sum -- a real
+    bug, since an individual strike's net_gex can flip sign strike-to-strike
+    from local OI noise without that representing the actual point where
+    aggregate dealer exposure flips. Worse, if more than one such local flip
+    existed across the chain, this returned whichever one it hit first
+    (leftmost), not necessarily the real zero-gamma level -- silently
+    diverging from what tt.py's get_gex (which the trading loop's entry gate
+    actually uses) would report for the same data.
+    """
+    cumulative = 0.0
+    prev_cumulative = 0.0
+    prev_strike = None
+    for i, s in enumerate(series):
+        prev_cumulative = cumulative
+        cumulative += s["net_gex"]
+        if i > 0 and ((prev_cumulative < 0 <= cumulative) or (prev_cumulative >= 0 > cumulative)):
+            denom = cumulative - prev_cumulative
+            t = (-prev_cumulative / denom) if denom != 0 else 0.5
+            return round(prev_strike + t * (s["strike"] - prev_strike), 2)
+        prev_strike = s["strike"]
     return None
 
 

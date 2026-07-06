@@ -591,6 +591,34 @@ async def cmd_get_market_overview(args) -> dict:
         return _error(exc)
 
 
+async def cmd_get_vix1d(args) -> dict:
+    """Live VIX1D (CBOE S&P 500 1-Day Volatility Index) via a one-off DXLink
+    Trade subscription -- not part of the streamer daemon's persistent
+    subscription window (it's a regime-gate input, not a traded/managed
+    symbol), so this always goes through this project's own live fetch
+    rather than the streamer HTTP cache-only path. Verified live 2026-07-06:
+    VIX1D streams real Trade events (confirmed price ~8.73 that day) even
+    though it has no live Quote/bid-ask (expected -- it's a calculated index
+    with no order book, only a Trade tick).
+
+    Intended as a more precise intraday-regime signal for 0DTE-specific
+    decisions than the standard 30-day VIX (which measures a much longer
+    volatility window than a same-day option actually spans) -- not yet
+    wired into any entry gate; CLAUDE.md's regime detection still uses
+    standard VIX only. See CLAUDE.md for how this might be incorporated.
+    """
+    try:
+        timeout = getattr(args, "timeout", 6.0)
+        trades = await _collect_last_prices(["VIX1D"], timeout)
+        last = trades.get("VIX1D")
+        result: dict = {"ok": True, "symbol": "VIX1D", "last": last}
+        if last is None:
+            result["note"] = "DXLink trade feed did not respond within the timeout."
+        return result
+    except Exception as exc:
+        return _error(exc)
+
+
 async def cmd_get_quote(args) -> dict:
     try:
         sym = args.symbol.strip().upper()
@@ -1498,6 +1526,9 @@ def main():
 
     sub.add_parser("stream_status")
 
+    p_vix1d = sub.add_parser("get_vix1d")
+    p_vix1d.add_argument("--timeout", type=float, default=6.0)
+
     p_orb = sub.add_parser("get_orb_range")
     p_orb.add_argument("--symbol", required=True, help="Trading symbol (e.g. XSP)")
 
@@ -1520,9 +1551,15 @@ def main():
 
     # Route through the streamer HTTP API when it's running.
     # This reuses the streamer's already-initialized OAuth session and cache,
-    # avoiding 1.3s of Python import overhead per call.
+    # avoiding 1.3s of Python import overhead per call. get_vix1d is excluded:
+    # the daemon doesn't recognize it and replies with a normal (non-None)
+    # {"ok": false, "error": "unknown command"} response rather than failing
+    # the HTTP call outright, so _try_streamer_http can't tell the difference
+    # between "daemon answered" and "daemon doesn't know this command" --
+    # skip the shortcut entirely for commands the daemon was never meant to
+    # own (VIX1D isn't a traded/managed symbol in its subscription window).
     args_dict = {k: v for k, v in vars(args).items() if k != "command" and v is not None}
-    http_result = _try_streamer_http(args.command, args_dict)
+    http_result = None if args.command == "get_vix1d" else _try_streamer_http(args.command, args_dict)
     if http_result is not None:
         _out(http_result)
         return
@@ -1534,6 +1571,7 @@ def main():
         "get_positions": cmd_get_positions,
         "get_market_overview": cmd_get_market_overview,
         "get_quote": cmd_get_quote,
+        "get_vix1d": cmd_get_vix1d,
         "get_option_chain": cmd_get_option_chain,
         "get_strategies": cmd_get_strategies,
         "get_gex": cmd_get_gex,

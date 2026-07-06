@@ -41,6 +41,15 @@ __pycache__/
 .agents/
 skills-lock.json
 
+# claude-flow/ruflo dev-session artifacts (dev-only tooling, not part of the trading agent)
+.swarm/
+.hive-mind/
+memory/
+.claude-flow/
+claude-flow.config.json
+claude-flow-metrics.json
+coordination/
+
 # Temp file space
 .tmp/
 

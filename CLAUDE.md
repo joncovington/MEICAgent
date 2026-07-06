@@ -23,6 +23,11 @@ CRITICAL_GUARDRAIL: DO NOT WRITE CODE IN THIS FILE
 > - **NEVER** log or display account numbers. **Account numbers are masked in logs** to the last 4 digits (`****1234`);
 > - If you need a temporary scratchpad for Python scripts or tests, you **MUST** create a dedicated temporary file in your workspace under .tmp/ and delete it when finished.
 
+## Documentation & Commit Rules
+- Do not mention Claude, Anthropic, or AI tools in the README.md or any other documentation file.
+- Write all documentation and pull request descriptions from a human developer's perspective.
+- Never include co-author attribution or AI signatures in git commit messages.
+
 ## Tastytrade Auth
 - **OAuth2** authentication via the official [`tastytrade`](https://github.com/tastyware/tastytrade) Python SDK (session tokens auto-refresh; refresh tokens are long-lived).
 - **Credentials stored in the OS keyring** (Windows Credential Manager / DPAPI, macOS Keychain, Linux Secret Service) — never in files, never in env vars, never logged.

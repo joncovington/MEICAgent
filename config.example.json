@@ -25,9 +25,10 @@
   "entry_window_start": "10:00",
   "entry_window_end": "14:30",
   "force_close_time": "15:45",
-  "max_entries_per_day": 4,
-  "_max_entries_per_day_note": "Set to -1 to disable the hard cap and rely on buying power and the agent's judgment alone.",
+  "daily_ic_trade_target": 2,
+  "_daily_ic_trade_target_note": "Target number of IC entries per day. This is a guidance heuristic, not a hard cap — buying power, max_concurrent_ics, and regime gates remain the binding constraints. The agent uses this target to calibrate position sizing and entry selectivity (e.g., if target is 2 and 1 is already open, remaining slots are reserved for only high-conviction setups). Set to 0 to disable IC entries and run ORB only.",
   "max_concurrent_ics": 4,
+  "_risk_profiles_note": "Rather than hand-editing config keys, use /set-risk-profile to switch between named presets: conservative (default, safest), moderate (recommended after 2–4 weeks), aggressive (after 2+ weeks at moderate with 60%+ win rate), very-aggressive (deliberate short experiments only). Each profile bundles related gate thresholds with offsetting position-cap and stop-management constraints. See config.risk.json and docs/risk-profiles.md for full rationale.",
 
   "entry_price_strategy_header": "===== Entry Price Strategy =====",
   "entry_price_strategy": "auto",
@@ -44,18 +45,12 @@
   "pre_submit_requote_threshold": 0.03,
 
   "credit_and_fee_floors_header": "===== Credit & Fee Floors =====",
-  "min_credit": {
-    "SPX": 1.00,
-    "XSP": 0.10,
-    "DEFAULT": 0.10
-  },
-  "_min_credit_note": "Absolute minimum net_credit (4-leg IC, dollar amount) per symbol, looked up by the configured symbol with DEFAULT as fallback for any symbol not listed. Same lookup pattern as fee_estimate_fallback_per_contract. Sits alongside (not instead of) min_credit_pct_of_width and min_net_credit_after_fees_per_contract — an entry must clear all three.",
   "min_credit_pct_of_width": 0.20,
   "_min_credit_pct_of_width_note": "Minimum credit as fraction of wing width; reject entries below this (e.g. 2-wide must collect >= $0.40).",
   "low_iv_credit_floor_iv_rank_max": 0.35,
   "low_iv_min_credit_pct_of_width": 0.15,
   "_low_iv_note": "When IV rank is >= min_iv_rank but <= low_iv_credit_floor_iv_rank_max, the credit floor relaxes to low_iv_min_credit_pct_of_width instead of min_credit_pct_of_width.",
-  "min_net_credit_after_fees_per_contract": 2.00,
+  "_min_net_credit_after_fees_note": "The fee-adjusted floor no longer uses a flat dollar constant (retired 2026-07-06). It now requires (ic_natural_bid * dollar_multiplier) - est_fee_per_contract to clear the same applicable pct-of-width floor above, converted to dollars. The old standalone min_credit absolute-dollar-per-symbol floor was also retired as redundant once this fee check became width/IV-aware.",
   "fee_estimate_lookback_trades": 20,
   "fee_estimate_min_sample_size": 5,
   "fee_estimate_fallback_per_contract": {

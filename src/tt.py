@@ -38,6 +38,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 
 import credentials as _creds
+import gex_math
 from session import get_session
 
 # ---------------------------------------------------------------------------
@@ -1182,7 +1183,7 @@ def _compute_gex(chain_entries: list[dict], greeks: dict, oi: dict, spot: float)
         gamma = _num(g.get("gamma") if isinstance(g, dict) else getattr(g, "gamma", None))
         if gamma is None:
             continue
-        gex_val = gamma * open_interest * multiplier * spot * spot * 0.01
+        gex_val = gex_math.dollar_gamma(gamma, open_interest, multiplier, spot)
         opt_type = entry.get("option_type", "")
         is_call = "C" in opt_type.upper()
         if strike not in per_strike:
@@ -1204,18 +1205,7 @@ def _compute_gex(chain_entries: list[dict], greeks: dict, oi: dict, spot: float)
     put_wall  = max(strikes_sorted, key=lambda x: x["put_gex"])["strike"]
 
     # Gamma flip: interpolate where cumulative net GEX crosses zero (scanning low→high strike)
-    gamma_flip: float | None = None
-    cumulative = 0.0
-    for i, s in enumerate(strikes_sorted):
-        prev = cumulative
-        cumulative += s["net_gex"]
-        if i > 0 and ((prev < 0 <= cumulative) or (prev >= 0 > cumulative)):
-            prev_strike = strikes_sorted[i - 1]["strike"]
-            curr_strike = s["strike"]
-            denom = cumulative - prev
-            t = (-prev / denom) if denom != 0 else 0.5
-            gamma_flip = round(prev_strike + t * (curr_strike - prev_strike), 2)
-            break
+    gamma_flip = gex_math.interpolate_zero_gamma(strikes_sorted)
 
     return {
         "ok": True,

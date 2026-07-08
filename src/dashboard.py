@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
+import gex_math
+
 # ── Timezone helpers ─────────────────────────────────────────────────────────
 
 try:
@@ -495,35 +497,6 @@ def _load_symbol() -> str:
     return _load_symbols()[0]
 
 
-def _compute_zero_gamma(series: list[dict]) -> float | None:
-    """Interpolate the price level where CUMULATIVE net GEX (summed strike by
-    strike, ascending -- `series` is already sorted this way) crosses zero.
-    Must match tt.py's `_compute_gex`/`gamma_flip` algorithm exactly.
-
-    This previously checked for a sign change between two ADJACENT strikes'
-    individual net_gex values instead of the running cumulative sum -- a real
-    bug, since an individual strike's net_gex can flip sign strike-to-strike
-    from local OI noise without that representing the actual point where
-    aggregate dealer exposure flips. Worse, if more than one such local flip
-    existed across the chain, this returned whichever one it hit first
-    (leftmost), not necessarily the real zero-gamma level -- silently
-    diverging from what tt.py's get_gex (which the trading loop's entry gate
-    actually uses) would report for the same data.
-    """
-    cumulative = 0.0
-    prev_cumulative = 0.0
-    prev_strike = None
-    for i, s in enumerate(series):
-        prev_cumulative = cumulative
-        cumulative += s["net_gex"]
-        if i > 0 and ((prev_cumulative < 0 <= cumulative) or (prev_cumulative >= 0 > cumulative)):
-            denom = cumulative - prev_cumulative
-            t = (-prev_cumulative / denom) if denom != 0 else 0.5
-            return round(prev_strike + t * (s["strike"] - prev_strike), 2)
-        prev_strike = s["strike"]
-    return None
-
-
 _TT_CMD = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tt.py")]
 _STREAMER_API = "http://127.0.0.1:7699/api"
 
@@ -811,19 +784,17 @@ def _build_gex_data(symbol: str | None = None) -> dict:
         # cache stores raw decimal (0.20); REST path stores already-pct (20.0)
         iv = raw_iv if (source == "rest" or raw_iv > 1) else raw_iv * 100
 
-        # Standard dollar-gamma-per-1%-move formula: gamma * OI * contract
-        # size * spot^2 * 0.01. Must match tt.py's _compute_gex exactly —
-        # this used to be gamma * oi * mult * spot (missing the spot^2 and
-        # 0.01 scale), which understated GEX by roughly spot/100 (~75x for
-        # SPX at 7483) relative to the number the trading loop actually
-        # gates entries on via `get_gex`.
+        # Shared dollar-gamma formula (src/gex_math.py) -- kept in one place after
+        # this used to be a second hand-maintained copy that silently understated
+        # GEX by ~75x for SPX (missing the spot^2 * 0.01 scale) relative to the
+        # number the trading loop actually gates entries on via tt.py's get_gex.
         _s = gex_spot or 0
-        gex = gamma * oi * mult * _s * _s * 0.01
+        gex = gex_math.dollar_gamma(gamma, oi, mult, _s)
         # Volume-based GEX: same dollar-gamma formula, substituting traded volume for open
         # interest — a "flow" reading alongside the "positioning" one. Note call_vol/put_vol
         # here is average_daily_volume from chain metadata (see `vol` above), not today's
         # live intraday volume, so this shares that same staleness characteristic.
-        gex_vol = gamma * vol * mult * _s * _s * 0.01
+        gex_vol = gex_math.dollar_gamma(gamma, vol, mult, _s)
         if "P" in otype:
             gex = -gex
             gex_vol = -gex_vol
@@ -863,8 +834,8 @@ def _build_gex_data(symbol: str | None = None) -> dict:
     total_put_gex  = abs(sum(s["put_gex"] for s in series if s["put_gex"] < 0))
     net_gex_total  = sum(s["net_gex"] for s in series)
     max_gex_s      = max(series, key=lambda s: s["abs_gex"], default=None)
-    # _compute_zero_gamma interpolates from series which already has scaled strikes
-    zero_gamma     = _compute_zero_gamma(series)
+    # gex_math.interpolate_zero_gamma interpolates from series which already has scaled strikes
+    zero_gamma     = gex_math.interpolate_zero_gamma(series)
     # Call/put walls: the strike with the largest gamma concentration on each side —
     # dealer resistance levels. series stores put_gex as a negative value (see above),
     # so the wall is the most negative entry, not the largest.

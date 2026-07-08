@@ -26,6 +26,19 @@ All of the following must pass — any one failure blocks the trade:
 7. **Account-wide caps** — max concurrent condors and max daily entries are shared across every traded symbol, not per-symbol
 8. **Event calendars** — hard blackouts/tighter rules around FOMC announcements, quarterly expiry, and triple witching
 
+## Risk Profiles
+
+Switch entry-gate thresholds with a single command instead of hand-editing `config.json`. A **risk profile** bundles IV-rank floors, credit minimums, delta limits, stop triggers, and position caps — each preset offsets its gate relaxations with compensating constraints (fewer concurrent ICs, tighter stops) so you're reallocating risk, not just adding it.
+
+| Profile | What it does | Trade-off |
+|---|---|---|
+| **conservative** (default) | Strict IV-rank (≥30%) and credit floors, wide OTM buffers, latest entry time (12:00 PM) | Fewest trades (~1–2/day), highest per-trade safety margin |
+| **moderate** | Slightly relax IV-rank (≥22%) and credit floors, enter earlier (11:00 AM) | ~1 more trade/day, thinner credit cushion but offset by tighter 93% stop |
+| **aggressive** | Tier 1 + accept closer-to-money strikes (delta 0.22, OTM tighter); cap 3 concurrent ICs instead of 4 | ~2–3 more trades/week, each one riskier but position cap and 90% stop limit total exposure |
+| **very-aggressive** | Tier 2 + trade through higher-VIX (≤30) and trending (ATR ≤40) conditions; cap 2 concurrent ICs, stop at 85% | Most trades (~3–5 more/week on active weeks), each with high gamma/pin risk; only for deliberate short experiments |
+
+Use `/set-risk-profile <name>` to switch (backed up automatically, takes effect on next loop). Start at **moderate** after 2–4 weeks if conservative rejects 40%+ of entries. See [docs/risk-profiles.md](docs/risk-profiles.md) for the full rationale, decision tree, and when to escalate.
+
 ## Dashboard
 
 Local web dashboard (auto-refreshing) with:
@@ -46,6 +59,7 @@ The agent runs as a recurring `/loop` — on each iteration (~every 5 minutes du
 - [Setup](docs/setup.md) — installation, configuration, database init, going live
 - [Operating](docs/operating.md) — starting the loop, status, dashboard, EOD report, logs
 - [Strategy](docs/strategy.md) — MEIC structure, wing width selection, stops, post-stop evaluation, EOD handling
+- [Risk Profiles](docs/risk-profiles.md) — trade-off tiers for entry-gate thresholds, when to switch, full rationale
 
 ---
 
@@ -86,7 +100,8 @@ MEICAgent/
 ├── docs/
 │   ├── setup.md                     # Installation and configuration
 │   ├── operating.md                 # Running and monitoring the agent
-│   └── strategy.md                  # MEIC strategy details
+│   ├── strategy.md                  # MEIC strategy details
+│   └── risk-profiles.md             # Entry-gate threshold presets and when to use each
 ├── .claude/
 │   ├── settings.json                # Permissions and MCP environment overrides
 │   └── commands/

@@ -166,6 +166,27 @@ def test_evaluate_entry_rejects_max_concurrent_ics_reached():
     assert reason == "max_concurrent_ics_reached"
 
 
+def test_evaluate_entry_concurrency_cap_is_account_wide():
+    # No open ICs on THIS symbol, but the profile is already at its cap across other symbols.
+    # The account-wide count must still block the entry (matches the live loop's account-wide
+    # max_concurrent_ics), even though the same-symbol overlap list is empty.
+    snap = _base_snapshot(now_et="13:00")
+    cap = CONSERVATIVE["max_concurrent_ics"]
+    entered, reason, _ = paper.evaluate_entry(snap, _params(CONSERVATIVE), open_ics=[],
+                                              account_open_count=cap)
+    assert entered is False
+    assert reason == "max_concurrent_ics_reached"
+
+
+def test_evaluate_entry_account_count_below_cap_still_evaluates():
+    # Below the account-wide cap → entry proceeds past the concurrency gate (reason is NOT
+    # the concurrency rejection), even if some ICs are open elsewhere.
+    snap = _base_snapshot(now_et="13:00")
+    entered, reason, _ = paper.evaluate_entry(snap, _params(CONSERVATIVE), open_ics=[],
+                                              account_open_count=CONSERVATIVE["max_concurrent_ics"] - 1)
+    assert reason != "max_concurrent_ics_reached"
+
+
 def test_evaluate_entry_atr_gate_is_percentage_based():
     # 590-priced symbol: ATR of 12 pts = 2.03% > conservative's 1.5% threshold → paused
     snap = _base_snapshot(now_et="13:00", atr_5day=12.0, underlying_price=590.0)

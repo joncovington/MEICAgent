@@ -20,9 +20,21 @@ Start-Process python -ArgumentList 'src\streamer.py' -WorkingDirectory $PWD -Win
 
 Invoke the `/paper-dashboard` skill to launch (or confirm already running) the paper-trading dashboard at http://localhost:5051, separate from the live dashboard's port 5050.
 
-## Step 3 — Paper-trading loop
+## Step 3 — Paper-trading loop daemon
 
-Invoke the `/paper-loop` skill directly (it is self-scheduling — unlike the live loop, its instructions are not wrapped inside `/loop`; `paper-loop.md`'s own Step 5 arms its next wakeup with the `/paper-loop` prompt).
+Check if the paper loop daemon is already running:
+
+```bash
+python src/paper_loop.py --status
+```
+
+If `running` is `false`, start it as a hidden background process (same pattern as the streamer). `src/paper_loop.py` runs the parallel-shadow engine unattended across every configured symbol on the live market-hours cadence (120s with open positions, 300s idle), so no per-iteration agent invocation is needed:
+
+```bash
+Start-Process python -ArgumentList 'src/paper_loop.py' -WorkingDirectory $PWD -WindowStyle Hidden
+```
+
+(For a one-off manual iteration instead of the daemon — e.g. to force a final force-close pass — run `python src/paper_loop.py --once`.)
 
 Tell the user:
-"Paper-trading session started — the loop will self-pace each iteration across all four risk profiles (conservative/moderate/aggressive/very-aggressive). Writes go to data/paper_trades.db only; the live account and data/meic_trades.db are untouched. Dashboard: http://localhost:5051 (Paper Mode). Run /paper-report for a performance summary."
+"Paper-trading session started — the paper loop daemon is running unattended across all four risk profiles (conservative/moderate/aggressive/very-aggressive), self-pacing on the market-hours cadence. Writes go to data/paper_trades.db only; the live account and data/meic_trades.db are untouched. Dashboard: http://localhost:5051 (Paper Mode). Stop with `python src/paper_loop.py --stop`; run /paper-report for a performance summary."

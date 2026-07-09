@@ -1,0 +1,427 @@
+"""Standalone paper-trading loop daemon.
+
+Runs the parallel-shadow paper engine (src/paper.py) unattended across every configured
+symbol on the live market-hours cadence — the code counterpart to the agent-orchestrated
+.claude/commands/paper-loop.md, so a paper session runs in the background like the streamer
+instead of needing a per-iteration agent invocation. All writes go to data/paper_trades.db;
+the live account and data/meic_trades.db are never touched.
+
+Each iteration, for every symbol in config.json's `symbols`:
+  - fetches the live underlying price + IV rank, the shared VIX / VIX1D (→ ratio), and GEX,
+  - builds wing-width candidates (from `wing_widths_by_symbol`) at the VIX-banded short delta,
+  - hands the snapshot to paper.process_symbol, which marks/exits open ICs across all four
+    profiles (including the physically-settled early force-close + friction) and evaluates
+    new entries per profile.
+
+CLI:
+  python src/paper_loop.py            # run the loop in the foreground
+  python src/paper_loop.py --once     # run a single iteration and exit (for testing)
+  python src/paper_loop.py --status   # print daemon status
+  python src/paper_loop.py --stop     # stop a running daemon
+
+Launch hidden in the background (like the streamer):
+  Start-Process python -ArgumentList 'src/paper_loop.py' -WorkingDirectory $PWD -WindowStyle Hidden
+"""
+
+import argparse
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import pytz
+    _ET = pytz.timezone("America/New_York")
+    def _now_et():
+        return datetime.now(_ET)
+except ImportError:
+    def _now_et():
+        return datetime.now(timezone.utc)
+
+_ROOT = Path(__file__).resolve().parent.parent
+_PID_FILE = _ROOT / "data" / "paper_loop.pid"
+_LOG_FILE = _ROOT / "logs" / "paper_loop.log"
+_PAPER_DB = str(_ROOT / "data" / "paper_trades.db")
+_CONFIG_PATH = _ROOT / "config.json"
+_TT = [sys.executable, str(_ROOT / "src" / "tt.py")]
+_DB = [sys.executable, str(_ROOT / "src" / "db.py"), "--db", _PAPER_DB]
+
+sys.path.insert(0, str(_ROOT / "src"))
+import paper  # noqa: E402
+
+logger = logging.getLogger("paper_loop")
+_stop = False
+
+
+def _setup_logging(console: bool = True):
+    _LOG_FILE.parent.mkdir(exist_ok=True)
+    handlers = [logging.FileHandler(_LOG_FILE)]
+    # A detached, hidden-window process (Start-Process -WindowStyle Hidden) can have an
+    # invalid stdout; writing to it via a StreamHandler risks killing the daemon. Only attach
+    # the console handler for interactive/--once runs where stdout is real.
+    if console and sys.stdout is not None and sys.stdout.isatty():
+        handlers.append(logging.StreamHandler(sys.stdout))
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s", handlers=handlers)
+
+
+def _handle_signal(signum, frame):
+    global _stop
+    _stop = True
+    logger.info("Received signal %s — stopping after this iteration.", signum)
+
+
+# ---------------------------------------------------------------------------
+# tt.py / db.py helpers
+# ---------------------------------------------------------------------------
+
+# Spawning children from a detached, hidden Windows process is fragile unless the child
+# gets no inherited console/stdin: give every subprocess an explicit null stdin and the
+# CREATE_NO_WINDOW flag so it can't attach to (or block on) the parent's hidden console.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _subrun(cmd, timeout=90):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL, creationflags=_NO_WINDOW)
+
+
+def _run_json(cmd, timeout=90):
+    try:
+        r = _subrun(cmd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "timeout"}
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {"ok": False, "error": (r.stdout[-200:] + r.stderr[-200:]).strip()}
+
+
+def _load_config():
+    with open(_CONFIG_PATH) as f:
+        return json.load(f)
+
+
+def _symbols(cfg):
+    if cfg.get("symbols"):
+        return [str(s).strip().upper() for s in cfg["symbols"] if str(s).strip()]
+    if cfg.get("symbol"):
+        return [str(cfg["symbol"]).strip().upper()]
+    return ["XSP"]
+
+
+# ---------------------------------------------------------------------------
+# Market-data → snapshot
+# ---------------------------------------------------------------------------
+
+def _delta_target(cfg, vix):
+    if vix is None:
+        return cfg.get("delta_target", 0.18)
+    if vix <= cfg.get("vix_band_low_max", 18):
+        return cfg.get("delta_target_vix_low", 0.16)
+    if vix <= cfg.get("vix_band_elevated_max", 25):
+        return cfg.get("delta_target_vix_elevated", 0.14)
+    if vix <= cfg.get("vix_band_high_max", 35):
+        return cfg.get("delta_target_vix_high", 0.12)
+    return cfg.get("delta_target_vix_crisis", 0.10)
+
+
+def _session_quality(now):
+    mins = now.hour * 60 + now.minute
+    if mins < 10 * 60 + 15:
+        return "open_volatile"
+    if mins < 12 * 60:
+        return "prime"
+    if mins < 14 * 60:
+        return "midday"
+    if mins < 14 * 60 + 45:
+        return "afternoon"
+    return "late"
+
+
+def _fetch_vix():
+    d = _run_json(_TT + ["get_market_overview", "--symbols", "VIX"])
+    if not d.get("ok"):
+        return None
+    for m in d.get("metrics", []):
+        for k in ("close", "last", "mark"):
+            if m.get(k) is not None:
+                try:
+                    return float(m[k])
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
+def _fetch_overview(symbol):
+    """Return (underlying_price, iv_rank) or (None, None)."""
+    d = _run_json(_TT + ["get_market_overview", "--symbols", symbol])
+    if not d.get("ok"):
+        return None, None
+    for m in d.get("metrics", []):
+        if str(m.get("symbol", "")).upper() != symbol:
+            continue
+        price = None
+        for k in ("close", "last", "mark"):
+            if m.get(k) is not None:
+                try:
+                    price = float(m[k]); break
+                except (TypeError, ValueError):
+                    pass
+        ivr = m.get("implied_volatility_index_rank")
+        ivr = float(ivr) if ivr is not None else None
+        return price, ivr
+    return None, None
+
+
+def _build_candidates(symbol, last, widths, delta_target, today):
+    """Fetch the 0DTE chain and build wing-width candidates + leg_quotes. Mirrors the
+    strike-selection the live loop/paper-loop.md describe: nearest-delta short strikes,
+    wings at each configured width. A wide strike window (80) also covers near-money legs
+    of already-open ICs so they mark this iteration."""
+    chain = _run_json(_TT + ["get_option_chain", "--symbol", symbol, "--expiration", today,
+                             "--include_quotes", "--include_greeks",
+                             "--around_price", str(last), "--strike_count", "80"])
+    if not chain.get("ok"):
+        return [], {}, chain.get("error", "chain fetch failed")
+    entries = []
+    for _exp, rows in chain.get("chain", {}).items():
+        entries = rows
+        break
+    calls, puts = [], []
+    for e in entries:
+        strike = e.get("strike_price") or e.get("strike")
+        if strike is None or e.get("bid") is None or e.get("ask") is None:
+            continue
+        ot = str(e.get("option_type", "")).lower()
+        rec = {"strike": float(strike), "streamer_symbol": e.get("streamer_symbol"),
+               "delta": e.get("delta"), "bid": e.get("bid"), "ask": e.get("ask")}
+        if "c" in ot and "p" not in ot:
+            calls.append(rec)
+        elif "p" in ot:
+            puts.append(rec)
+    leg_quotes = {r["streamer_symbol"]: {"bid": r["bid"], "ask": r["ask"],
+                                         "mid": round((r["bid"] + r["ask"]) / 2, 4)}
+                  for r in calls + puts if r["streamer_symbol"]}
+    if not calls or not puts:
+        return [], leg_quotes, "no call/put quotes"
+
+    def nearest(pool, target):
+        c = [x for x in pool if x["delta"] is not None]
+        return min(c, key=lambda x: abs(abs(x["delta"]) - target)) if c else None
+
+    short_call = nearest([c for c in calls if c["strike"] > last], delta_target)
+    short_put = nearest([p for p in puts if p["strike"] < last], delta_target)
+    if not short_call or not short_put:
+        return [], leg_quotes, "no short strike near delta"
+    by_call = {c["strike"]: c for c in calls}
+    by_put = {p["strike"]: p for p in puts}
+    candidates = []
+    for w in widths:
+        lc = by_call.get(short_call["strike"] + w)
+        lp = by_put.get(short_put["strike"] - w)
+        if lc and lp:
+            candidates.append({"wing_width": w, "short_put": short_put, "long_put": lp,
+                               "short_call": short_call, "long_call": lc})
+    return candidates, leg_quotes, None
+
+
+def _open_count():
+    d = _run_json(_DB + ["get_open_trades"])
+    return len(d.get("open_trades", [])) if d.get("ok") else 0
+
+
+# ---------------------------------------------------------------------------
+# Iteration
+# ---------------------------------------------------------------------------
+
+def run_iteration(cfg):
+    now = _now_et()
+    today = now.strftime("%Y-%m-%d")
+    now_et = now.strftime("%H:%M")
+    vix = _fetch_vix()
+    vix1d = _run_json(_TT + ["get_vix1d"]).get("last")
+    vix1d_ratio = round(vix1d / vix, 3) if (vix1d and vix) else None
+    delta_target = _delta_target(cfg, vix)
+    widths_by_sym = cfg.get("wing_widths_by_symbol", {})
+    session = _session_quality(now)
+
+    summary = {}
+    for symbol in _symbols(cfg):
+        price, ivr = _fetch_overview(symbol)
+        if price is None:
+            summary[symbol] = {"error": "no price"}
+            continue
+        widths = widths_by_sym.get(symbol, widths_by_sym.get("DEFAULT", [2, 5, 10]))
+        candidates, leg_quotes, cand_err = _build_candidates(symbol, price, widths, delta_target, today)
+        gex = _run_json(_TT + ["get_gex", "--symbol", symbol])
+        snapshot = {
+            "symbol": symbol, "date": today, "now_et": now_et, "expiration": today, "dte": 0,
+            "underlying_price": price, "iv_rank": ivr, "iv_rank_source": "native",
+            "vix": vix, "vix1d_ratio": vix1d_ratio,
+            "atr_5day": None,  # no historical-OHLC source wired in; ATR pct gate stays inactive
+            "session_quality": session,
+            "gex": gex if gex.get("ok") else {"ok": False},
+            "candidates": candidates, "leg_quotes": leg_quotes,
+        }
+        result = paper.process_symbol(snapshot, _PAPER_DB, "paper")
+        # Compact per-profile outcome for the log
+        outcomes = {}
+        for prof, actions in result.get("results", {}).items():
+            for a in actions:
+                if a.get("entry") == "filled":
+                    outcomes[prof] = f"FILLED {a.get('net_credit')}"
+                elif a.get("entry") == "skipped":
+                    outcomes.setdefault(prof, a.get("reason"))
+                elif "decision" in a:
+                    act = a["decision"].get("action")
+                    if act and act != "hold":
+                        outcomes[prof] = f"exit:{act}"
+        summary[symbol] = {"ivr": ivr, "widths": [c["wing_width"] for c in candidates],
+                           "outcomes": outcomes, "cand_err": cand_err}
+
+    reason = f"vix={vix} vix1d_ratio={vix1d_ratio} delta={delta_target} " + \
+             " | ".join(f"{s}:{v.get('outcomes', v.get('error'))}" for s, v in summary.items())
+    try:
+        _subrun(_DB + ["log_loop_action", "--action", "paper_iteration", "--reasoning", reason[:900]])
+    except Exception:
+        pass
+    logger.info("iteration @ %s ET | %s", now_et, reason)
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Cadence / time gate
+# ---------------------------------------------------------------------------
+
+def _is_trading_time(now, cfg):
+    if now.weekday() >= 5:
+        return False
+    holidays = cfg.get(f"nyse_holidays_{now.year}", [])
+    if now.strftime("%Y-%m-%d") in holidays:
+        return False
+    mins = now.hour * 60 + now.minute
+    return 9 * 60 + 30 <= mins < 16 * 60
+
+
+def _sleep_seconds(now, cfg, open_positions):
+    if not _is_trading_time(now, cfg):
+        return 600  # idle outside market hours; daemon stays up until --stop
+    return 120 if open_positions > 0 else 300
+
+
+# ---------------------------------------------------------------------------
+# Daemon control (mirrors src/streamer.py)
+# ---------------------------------------------------------------------------
+
+def _running_pid():
+    if not _PID_FILE.exists():
+        return None
+    try:
+        pid = int(_PID_FILE.read_text().strip())
+    except ValueError:
+        _PID_FILE.unlink(missing_ok=True)
+        return None
+    alive = False
+    try:
+        import psutil
+        alive = psutil.pid_exists(pid)
+    except ImportError:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except (PermissionError,):
+            alive = True
+        except (OSError, SystemError):
+            alive = False
+    if alive:
+        return pid
+    _PID_FILE.unlink(missing_ok=True)
+    return None
+
+
+def _cmd_status():
+    pid = _running_pid()
+    info = {"running": pid is not None, "pid": pid, "open_positions": _open_count()}
+    print(json.dumps(info))
+
+
+def _cmd_stop():
+    pid = _running_pid()
+    if pid is None:
+        print(json.dumps({"ok": False, "error": "not running"}))
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(json.dumps({"ok": True, "signal": "SIGTERM", "pid": pid}))
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+
+
+def _loop():
+    _PID_FILE.parent.mkdir(exist_ok=True)
+    _PID_FILE.write_text(str(os.getpid()))
+    signal.signal(signal.SIGTERM, _handle_signal)
+    try:
+        signal.signal(signal.SIGINT, _handle_signal)
+    except Exception:
+        pass
+    logger.info("Paper loop daemon started (pid %d).", os.getpid())
+    try:
+        while not _stop:
+            cfg = _load_config()
+            now = _now_et()
+            if _is_trading_time(now, cfg):
+                try:
+                    run_iteration(cfg)
+                except Exception as exc:
+                    logger.exception("iteration error: %s", exc)
+            else:
+                logger.info("outside trading window (%s ET) — idling.", now.strftime("%H:%M"))
+            delay = _sleep_seconds(_now_et(), cfg, _open_count())
+            # Sleep in short slices so a SIGTERM is honored promptly.
+            for _ in range(delay):
+                if _stop:
+                    break
+                time.sleep(1)
+    finally:
+        _PID_FILE.unlink(missing_ok=True)
+        logger.info("Paper loop daemon stopped.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MEICAgent paper-trading loop daemon")
+    parser.add_argument("--status", action="store_true", help="Print daemon status and exit")
+    parser.add_argument("--stop", action="store_true", help="Stop a running daemon")
+    parser.add_argument("--once", action="store_true", help="Run one iteration and exit (testing)")
+    args = parser.parse_args()
+
+    if args.status:
+        _cmd_status()
+        return
+    if args.stop:
+        _cmd_stop()
+        return
+
+    if args.once:
+        _setup_logging(console=True)
+        summary = run_iteration(_load_config())
+        print(json.dumps({"ok": True, "summary": summary}, default=str))
+        return
+
+    existing = _running_pid()
+    if existing is not None:
+        print(json.dumps({"ok": False, "error": f"Paper loop already running (pid {existing}). "
+                                                 f"Run 'python src/paper_loop.py --stop' first."}))
+        raise SystemExit(1)
+    _setup_logging(console=False)  # daemon: file-only, no fragile stdout dependency
+    _loop()
+
+
+if __name__ == "__main__":
+    main()

@@ -130,19 +130,25 @@ def _time_to_minutes(hhmm: str) -> int:
     return int(h) * 60 + int(m)
 
 
-def evaluate_entry(snapshot: dict, params: dict, open_ics: list) -> tuple:
+def evaluate_entry(snapshot: dict, params: dict, open_ics: list,
+                   account_open_count: int | None = None) -> tuple:
     """Encode the Step-6 hard-stops from CLAUDE.md against one profile's thresholds.
 
     snapshot: one pre-fetched market snapshot for a symbol/session (see paper-loop.md for
         exact shape) including a `candidates` list — one entry per scanned wing width.
     params: this profile's merged config (base config.json + config.risk.json overrides).
-    open_ics: this profile's currently-open paper ICs on this symbol (for strike overlap
-        and max_concurrent_ics, scoped to the profile — each profile is its own virtual
-        account so concurrency limits are evaluated independently).
+    open_ics: this profile's currently-open paper ICs **on this symbol** — used for the
+        strike-overlap hard stop (strikes are only ever compared within the same symbol).
+    account_open_count: this profile's total open ICs **across every symbol**, for the
+        max_concurrent_ics cap — which CLAUDE.md defines as account-wide ("open ICs across
+        every symbol combined"), each profile being its own virtual account. Defaults to
+        len(open_ics) when omitted (single-symbol callers / tests).
 
     Returns (enter: bool, reason: str, chosen_candidate: dict | None).
     """
     symbol = snapshot["symbol"]
+    if account_open_count is None:
+        account_open_count = len(open_ics)
 
     # 0DTE hard stop
     if snapshot.get("dte", 0) != 0:
@@ -177,8 +183,9 @@ def evaluate_entry(snapshot: dict, params: dict, open_ics: list) -> tuple:
         if now_min < _time_to_minutes(params["late_entry_bias_start_time"]):
             return False, "late_entry_bias_wait", None
 
-    # Concurrent IC cap (per profile — each profile is its own virtual account)
-    if len(open_ics) >= params["max_concurrent_ics"]:
+    # Concurrent IC cap — account-wide for this profile (across every symbol), matching the
+    # live loop's account-wide max_concurrent_ics; each profile is its own virtual account.
+    if account_open_count >= params["max_concurrent_ics"]:
         return False, "max_concurrent_ics_reached", None
 
     # Quarterly / triple-witching hard stops
@@ -508,6 +515,14 @@ def _get_open_trades(symbol: str, profile: str, trade_date: str, db_path: str) -
     return [t for t in trades if t.get("risk_profile") == profile]
 
 
+def _get_profile_open_count(profile: str, trade_date: str, db_path: str) -> int:
+    """This profile's total open ICs across every symbol — the account-wide count the
+    max_concurrent_ics cap is checked against (not the per-symbol count)."""
+    result = _db(["get_open_trades", "--date", trade_date], db_path)
+    trades = result.get("open_trades", []) if result.get("ok") else []
+    return sum(1 for t in trades if t.get("risk_profile") == profile)
+
+
 def process_symbol(snapshot: dict, db_path: str, execution_mode: str, profiles_filter=None) -> dict:
     """Run all four profiles' mark-to-market/exit + entry evaluation for one symbol against
     one already-fetched snapshot. Returns a per-profile action summary for logging."""
@@ -535,8 +550,10 @@ def process_symbol(snapshot: dict, db_path: str, execution_mode: str, profiles_f
             _apply_exit_decision(trade, decision, symbol, db_path)
 
         still_open = _get_open_trades(symbol, name, snapshot["date"], db_path)
-        if len(still_open) < params["max_concurrent_ics"]:
-            entered, reason, chosen = evaluate_entry(snapshot, params, still_open)
+        account_open = _get_profile_open_count(name, snapshot["date"], db_path)
+        if account_open < params["max_concurrent_ics"]:
+            entered, reason, chosen = evaluate_entry(snapshot, params, still_open,
+                                                     account_open_count=account_open)
             if entered:
                 row = synthetic_entry_fill(snapshot, name, chosen, params, execution_mode)
                 save_result = _save_trade(row, db_path)

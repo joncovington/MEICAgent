@@ -3,10 +3,12 @@
 ## Requirements
 
 - **Python 3.11+**
-- **An agentic coding assistant** capable of running project skills/slash commands and maintaining a persistent instructions file (this project's `.claude/commands/` and `CLAUDE.md` follow that convention)
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Anthropic's CLI coding assistant. The agent's decision loop and all the `/`-commands in this guide (`/setup`, `/meic-start`, `/paper-start`, `/dashboard`, etc.) run inside Claude Code, driven by the operating instructions in `CLAUDE.md` and the skills in `.claude/commands/`. Install it with `npm install -g @anthropic-ai/claude-code`, then start it from the project directory by running `claude`.
 - **tastytrade account** — live account or developer sandbox (tastytrade does not offer paper trading; the developer sandbox is a separate environment for testing without real capital)
 
 There is no separate MCP server to install — `src/tt.py` talks to tastytrade directly via the official Python SDK (OAuth2).
+
+> **How you run it:** the plain `python …` commands below run in a normal terminal. The `/`-prefixed commands (like `/meic-start`) are Claude Code skills — type them at the Claude Code prompt after running `claude` in the project folder. Everything Claude Code does is also doable by hand with the underlying `python src/*.py` commands; the skills just orchestrate them.
 
 ---
 
@@ -22,7 +24,8 @@ cd MEICAgent
 ### 2. Install Python dependencies
 
 ```bash
-pip install pytz pytest pytest-asyncio
+pip install -e .                    # installs tastytrade, keyring, pytz, flask (from pyproject.toml)
+pip install pytest pytest-asyncio   # optional — only needed to run the test suite
 ```
 
 ### 3. Set tastytrade credentials

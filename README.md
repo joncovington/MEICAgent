@@ -12,7 +12,12 @@ An autonomous options trading agent running the **Multiple Entry Iron Condor (ME
 
 > Two kinds of commands appear in this guide: plain `python …` commands run in a normal terminal, and `/`-prefixed commands (like `/meic-start`) are Claude Code skills you type at the `claude` prompt. The skills just orchestrate the same underlying `python src/*.py` calls.
 
-**New to this? First, open a terminal and get the code.** You'll need [Git](https://git-scm.com/downloads) installed (on Windows, the installer gives you a "Git Bash" terminal you can use for every command here). Then download this project and move into its folder:
+**New to this? First, open a terminal and get the code.** You'll need [Git](https://git-scm.com/downloads) installed. Open your terminal:
+- **Windows** — the Git installer includes "Git Bash"; use it for every command here.
+- **macOS** — open **Terminal** (Applications → Utilities), or install Git via `xcode-select --install`.
+- **Linux** — open your terminal; install Git with your package manager (e.g. `sudo apt install git`).
+
+Then download this project and move into its folder:
 
 ```bash
 # 1. Download ("clone") the project, then move into the folder it creates
@@ -20,7 +25,7 @@ git clone https://github.com/joncovington/MEICAgent.git
 cd MEICAgent
 ```
 
-Every command below is run from inside that `MEICAgent` folder.
+Every command below is run from inside that `MEICAgent` folder. On macOS/Linux, if `python`/`pip` aren't found, use `python3`/`pip3` instead.
 
 ```bash
 # 2. Install dependencies (tastytrade, keyring, pytz, flask from pyproject.toml)
@@ -47,7 +52,7 @@ Then, inside Claude Code, pick a track:
 /paper-start
 ```
 
-Launches the market-data streamer, the paper dashboard at `http://localhost:5051`, and registers a self-healing scheduled task that evaluates every configured symbol every 2 minutes during market hours.
+Launches the market-data streamer, the paper dashboard at `http://localhost:5051`, and (on Windows) registers a self-healing scheduled task that evaluates every configured symbol every 2 minutes during market hours. On **macOS/Linux**, the scheduled task isn't available — instead keep the loop running in a terminal with `python src/paper_loop.py`, or wire a cron job to `python src/paper_loop.py --once` every 2 minutes.
 
 **Live / dry-run trading** — the real agent loop (defaults to dry-run until `enable_live_trading: true`):
 

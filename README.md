@@ -12,17 +12,25 @@ An autonomous options trading agent running the **Multiple Entry Iron Condor (ME
 
 > Two kinds of commands appear in this guide: plain `python …` commands run in a normal terminal, and `/`-prefixed commands (like `/meic-start`) are Claude Code skills you type at the `claude` prompt. The skills just orchestrate the same underlying `python src/*.py` calls.
 
-```bash
-# In a terminal, from the project folder:
+**New to this? First, open a terminal and get the code.** You'll need [Git](https://git-scm.com/downloads) installed (on Windows, the installer gives you a "Git Bash" terminal you can use for every command here). Then download this project and move into its folder:
 
-# 1. Install dependencies (tastytrade, keyring, pytz, flask from pyproject.toml)
+```bash
+# 1. Download ("clone") the project, then move into the folder it creates
+git clone https://github.com/joncovington/MEICAgent.git
+cd MEICAgent
+```
+
+Every command below is run from inside that `MEICAgent` folder.
+
+```bash
+# 2. Install dependencies (tastytrade, keyring, pytz, flask from pyproject.toml)
 pip install -e .
 pip install pytest pytest-asyncio     # optional — only needed to run the test suite
 
-# 2. Initialize the database
+# 3. Initialize the database
 python src/db.py init_db
 
-# 3. Launch Claude Code, then run the guided credential + config setup:
+# 4. Launch Claude Code, then run the guided credential + config setup:
 claude
 ```
 ```

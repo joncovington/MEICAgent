@@ -20,7 +20,10 @@ For a full session that runs on its own without per-iteration invocation, use `/
 python src/paper_loop.py --install-task    # register + fire the first run (recommended)
 python src/paper_loop.py --status          # daemon/task status + open-position count
 python src/paper_loop.py --uninstall-task  # stop the unattended session
+python src/paper_loop.py --eod-report       # write logs/paper-eod-<date>.md now (--date to backfill)
 ```
+
+The daemon also writes that deterministic end-of-day report automatically, once, at the 16:00 settlement pass — a per-profile metrics table (trades, win rate, net P&L, expectancy, profit factor, max drawdown), an exits-by-reason breakdown, and per-symbol P&L. It's code-generated (no agent), distinct from the agent-synthesized `/paper-report`.
 
 On non-Windows hosts, run `python src/paper_loop.py` in a terminal (or wire a cron job to `--once`). A long-running detached daemon (`--start`) also exists but is less robust on Windows than the scheduled task.
 

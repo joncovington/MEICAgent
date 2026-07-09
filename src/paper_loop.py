@@ -1,7 +1,7 @@
 """Standalone paper-trading loop daemon.
 
 Runs the parallel-shadow paper engine (src/paper.py) unattended across every configured
-symbol on the live market-hours cadence — the code counterpart to the agent-orchestrated
+symbol on the live market-hours cadence - the code counterpart to the agent-orchestrated
 .claude/commands/paper-loop.md, so a paper session runs in the background like the streamer
 instead of needing a per-iteration agent invocation. All writes go to data/paper_trades.db;
 the live account and data/meic_trades.db are never touched.
@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -94,7 +95,7 @@ def _setup_logging(console: bool = True):
 def _handle_signal(signum, frame):
     global _stop
     _stop = True
-    logger.info("Received signal %s — stopping after this iteration.", signum)
+    logger.info("Received signal %s - stopping after this iteration.", signum)
 
 
 # ---------------------------------------------------------------------------
@@ -271,30 +272,122 @@ def _fmt_symbol(sym, info):
     if info.get("error"):
         return f"{sym}: ERROR {info['error']}"
     ivr = info.get("ivr")
-    ivr_s = f"{ivr:.2f}" if isinstance(ivr, (int, float)) else "—"
+    ivr_s = f"{ivr:.2f}" if isinstance(ivr, (int, float)) else "-"
     outc = info.get("outcomes") or {}
     ordered = [outc.get(p) for p in paper.ALL_PROFILE_NAMES]
     if not any(ordered):
-        return f"{sym}(ivr {ivr_s}): —"
+        return f"{sym}(ivr {ivr_s}): -"
     if len(set(ordered)) == 1 and ordered[0] is not None:
         return f"{sym}(ivr {ivr_s}): all {ordered[0]}"
-    parts = " ".join(f"{_PROF_ABBR.get(p, p)}:{outc.get(p, '—')}" for p in paper.ALL_PROFILE_NAMES)
+    parts = " ".join(f"{_PROF_ABBR.get(p, p)}:{outc.get(p, '-')}" for p in paper.ALL_PROFILE_NAMES)
     return f"{sym}(ivr {ivr_s}): {parts}"
 
 
 def _format_iteration(now_et, vix, vix1d_ratio, delta_target, summary):
     """A compact, human-readable one-line iteration summary for the log and the dashboard."""
-    vix_s = f"{vix:.1f}" if isinstance(vix, (int, float)) else "—"
-    ratio_s = f"{vix1d_ratio:.2f}" if isinstance(vix1d_ratio, (int, float)) else "—"
+    vix_s = f"{vix:.1f}" if isinstance(vix, (int, float)) else "-"
+    ratio_s = f"{vix1d_ratio:.2f}" if isinstance(vix1d_ratio, (int, float)) else "-"
     header = f"[{now_et} ET] VIX {vix_s}  1D-ratio {ratio_s}  delta {delta_target}"
     body = "   ".join(_fmt_symbol(s, summary[s]) for s in summary)
     return f"{header}   {body}"
 
 
+# ---------------------------------------------------------------------------
+# Deterministic end-of-day report
+# ---------------------------------------------------------------------------
+
+def _eod_report_path(day):
+    return _LOG_FILE.parent / f"paper-eod-{day}.md"
+
+
+def _money(x):
+    return f"-${abs(x):,.2f}" if x is not None and x < 0 else f"${x:,.2f}" if x is not None else "-"
+
+
+def _write_eod_report(day):
+    """Write a deterministic end-of-day paper report for `day` to logs/paper-eod-<day>.md.
+    Code-generated (no agent) so it runs unattended from the daemon's settlement pass. Uses
+    db.py get_range_summary for the tested per-profile metrics, plus a direct read for the
+    exit-reason breakdown and per-symbol P&L. Returns the path written."""
+    summ = _run_json(_DB + ["get_range_summary", "--start", day, "--end", day])
+    profiles = summ.get("profiles", {}) if summ.get("ok") else {}
+
+    exits, by_symbol = {}, {}
+    entries = open_n = 0
+    net_total = 0.0
+    try:
+        con = sqlite3.connect(_PAPER_DB)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT symbol, status, exit_reason, pnl, fees FROM ic_trades WHERE trade_date=?",
+            (day,)).fetchall()
+        con.close()
+    except sqlite3.Error:
+        rows = []
+    for r in rows:
+        st = r["status"]
+        if st == "cancelled":
+            continue
+        entries += 1
+        net = (r["pnl"] or 0) - (r["fees"] or 0)
+        net_total += net
+        by_symbol[r["symbol"]] = by_symbol.get(r["symbol"], 0.0) + net
+        if st in ("open", "partial", "pending", "partial_entry"):
+            open_n += 1
+            reason = "(still open)"
+        else:
+            reason = r["exit_reason"] or st
+        exits[reason] = exits.get(reason, 0) + 1
+
+    L = [f"# Paper Trading - EOD Report {day}", ""]
+    L.append("_Deterministic parallel-shadow engine. MEIC has no profit target - exits are "
+             "per-side stops, non-cash-settled time force-close, or cash-settled "
+             "expiration-settlement._")
+    L.append("")
+    L.append("## Account-wide (all profiles)")
+    L.append(f"- Entries filled: **{entries}**")
+    L.append(f"- Net P&L (net of fees): **{_money(round(net_total, 2))}**")
+    L.append(f"- Still open at report time: {open_n}")
+    if by_symbol:
+        L.append(f"- By symbol: " + ", ".join(f"{s} {_money(round(v, 2))}" for s, v in sorted(by_symbol.items())))
+    L.append("")
+
+    L.append("## Per profile")
+    L.append("| Profile | Trades | Wins | Losses | Win % | Net P&L | Expectancy/IC | Profit Factor | Max DD |")
+    L.append("|---|---|---|---|---|---|---|---|---|")
+    for name in ("conservative", "moderate", "aggressive", "very-aggressive"):
+        s = profiles.get(name)
+        if not s:
+            L.append(f"| {name} | 0 | - | - | - | $0.00 | - | - | - |")
+            continue
+        wr = f"{s['win_rate_pct']:.0f}%" if s.get("win_rate_pct") is not None else "-"
+        pf = f"{s['profit_factor']:.2f}" if s.get("profit_factor") is not None else "-"
+        exp = _money(s.get("expectancy_per_trade")) if s.get("expectancy_per_trade") is not None else "-"
+        L.append(f"| {name} | {s.get('total_trades', 0)} | {s.get('win_count', 0)} | "
+                 f"{s.get('loss_count', 0)} | {wr} | {_money(s.get('net_pnl'))} | {exp} | {pf} | "
+                 f"{_money(s.get('max_drawdown'))} |")
+    L.append("")
+
+    L.append("## Exits by reason")
+    if exits:
+        L.append("| Reason | Count |")
+        L.append("|---|---|")
+        for reason, cnt in sorted(exits.items(), key=lambda kv: -kv[1]):
+            L.append(f"| {reason} | {cnt} |")
+    else:
+        L.append("_No entries today - flat session._")
+    L.append("")
+    L.append(f"_Generated {_now_et().strftime('%Y-%m-%d %H:%M:%S %Z')} · paper DB only; live account untouched._")
+
+    path = _eod_report_path(day)
+    path.write_text("\n".join(L), encoding="utf-8")
+    return path
+
+
 def run_iteration(cfg, force=False):
     now = _now_et()
     if not force and not _is_trading_time(now, cfg):
-        logger.info("outside trading window (%s ET) — skipping.", now.strftime("%H:%M"))
+        logger.info("outside trading window (%s ET) - skipping.", now.strftime("%H:%M"))
         return {"skipped": "outside_trading_window"}
     today = now.strftime("%Y-%m-%d")
     now_et = now.strftime("%H:%M")
@@ -324,7 +417,7 @@ def run_iteration(cfg, force=False):
             "candidates": candidates, "leg_quotes": leg_quotes,
         }
         result = paper.process_symbol(snapshot, _PAPER_DB, "paper")
-        # Per-profile outcome for the log — fills and exits made to stand out from skips.
+        # Per-profile outcome for the log - fills and exits made to stand out from skips.
         outcomes = {}
         for prof, actions in result.get("results", {}).items():
             for a in actions:
@@ -345,6 +438,17 @@ def run_iteration(cfg, force=False):
     except Exception:
         pass
     logger.info("%s", reason)
+
+    # Once-per-day EOD report, written on the first pass at/after the settlement time (16:00),
+    # i.e. after positions have settled. The file-exists guard makes it fire exactly once even
+    # though the daemon keeps ticking through the 16:00–16:05 settlement window.
+    sett = cfg.get("expiration_settlement_time", "16:00")
+    if (now.hour * 60 + now.minute) >= paper._time_to_minutes(sett) and not _eod_report_path(today).exists():
+        try:
+            p = _write_eod_report(today)
+            logger.info("wrote EOD report: %s", p)
+        except Exception as exc:
+            logger.warning("EOD report failed: %s", exc)
     return summary
 
 
@@ -359,7 +463,7 @@ def _is_trading_time(now, cfg):
     if now.strftime("%Y-%m-%d") in holidays:
         return False
     mins = now.hour * 60 + now.minute
-    # Runs 09:30 through 16:05 — the extra 5 min past the 16:00 close lets the settlement pass
+    # Runs 09:30 through 16:05 - the extra 5 min past the 16:00 close lets the settlement pass
     # fire so cash-settled positions left to expire get settled at the close (paper.settlement_
     # active fires at expiration_settlement_time, default 16:00). Entries are independently
     # blocked after entry_window_end (14:30), so the extension only affects marking/settlement.
@@ -435,7 +539,7 @@ def _cmd_stop():
 def _spawn_detached():
     """Launch a fully detached background copy of the daemon and return. On Windows this uses
     DETACHED_PROCESS (no console at all) + a new process group, so the daemon can't be stopped
-    by stray CTRL_C/CTRL_CLOSE console events from whatever shell launched it — the failure
+    by stray CTRL_C/CTRL_CLOSE console events from whatever shell launched it - the failure
     mode that made -WindowStyle Hidden / Task Scheduler launches exit within seconds. Stop it
     explicitly with --stop."""
     existing = _running_pid()
@@ -488,7 +592,7 @@ def _loop():
                 except Exception as exc:
                     logger.exception("iteration error: %s", exc)
             else:
-                logger.info("outside trading window (%s ET) — idling.", now.strftime("%H:%M"))
+                logger.info("outside trading window (%s ET) - idling.", now.strftime("%H:%M"))
             delay = _sleep_seconds(_now_et(), cfg, _open_count())
             # Sleep in short slices so a SIGTERM is honored promptly.
             for _ in range(delay):
@@ -533,7 +637,7 @@ def _release_once_lock():
 # ---------------------------------------------------------------------------
 # A long-running detached daemon proved fragile on Windows (stray console events / abrupt
 # death of a child-spawning process). Instead the automation registers a Task Scheduler job
-# that runs `--once` every 2 minutes — each run is a short-lived process that reliably
+# that runs `--once` every 2 minutes - each run is a short-lived process that reliably
 # completes, self-heals if one fails, no-ops outside market hours (time-gated), and persists
 # across sessions independent of any launching shell.
 
@@ -579,11 +683,19 @@ def main():
     parser.add_argument("--once", action="store_true", help="Run a single iteration and exit")
     parser.add_argument("--force", action="store_true",
                         help="With --once, run even outside market hours (for testing)")
+    parser.add_argument("--eod-report", action="store_true",
+                        help="Write the deterministic end-of-day paper report now (regenerates)")
+    parser.add_argument("--date", default=None, help="With --eod-report, the day (YYYY-MM-DD); default today")
     parser.add_argument("--_run", action="store_true", help=argparse.SUPPRESS)  # internal: the detached child
     args = parser.parse_args()
 
     if args.status:
         _cmd_status()
+        return
+    if args.eod_report:
+        day = args.date or _now_et().strftime("%Y-%m-%d")
+        path = _write_eod_report(day)
+        _emit({"ok": True, "report": str(path)})
         return
     if args.stop:
         _cmd_stop()

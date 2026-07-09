@@ -55,6 +55,7 @@ _PAPER_DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
 _CACHE_DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "stream_cache.db")
 _CONFIG_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json")
 _LOG_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "agent.log")
+_PAPER_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "paper_loop.log")
 # "live" (default, data/meic_trades.db) or "paper" (data/paper_trades.db) — set from --mode
 # in main(). Drives the PAPER MODE banner; _DB_PATH itself is the only thing that changes
 # which data actually gets served. _CACHE_DB_PATH (the streamer cache) is never mode-dependent
@@ -410,6 +411,21 @@ def _spread_statuses(trade: dict, put_leg: dict | None = None, call_leg: dict | 
 
 # ── Log tail ──────────────────────────────────────────────────────────────────
 
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"}
+
+
+def _parse_plain_log_line(raw: str) -> dict:
+    """Parse a stdlib-logging line like '2026-07-09 14:00:04,306 INFO message' into the
+    {ts, level, msg} shape the Logs tab expects (paper_loop.log uses this format, not the
+    JSONL that agent.log uses). Falls back to the whole line as an INFO message."""
+    parts = raw.split(None, 3)
+    if len(parts) >= 4 and parts[2] in _LOG_LEVELS:
+        ts = parts[1].split(",")[0]              # HH:MM:SS (drop milliseconds)
+        level = "WARN" if parts[2] == "WARNING" else parts[2]
+        return {"ts": ts, "level": level, "msg": parts[3]}
+    return {"ts": "", "level": "INFO", "msg": raw}
+
+
 def _build_log_data(n: int = 200) -> dict:
     if not os.path.exists(_LOG_PATH):
         return {"ok": True, "lines": [], "note": "Log file not found"}
@@ -430,7 +446,7 @@ def _build_log_data(n: int = 200) -> dict:
                     ts = ts.split("T")[1][:8]
                 lines.append({"ts": ts, "level": obj.get("level", "INFO"), "msg": obj.get("message", raw)})
             except (json.JSONDecodeError, ValueError):
-                lines.append({"ts": "", "level": "INFO", "msg": raw})
+                lines.append(_parse_plain_log_line(raw))
         return {"ok": True, "lines": lines}
     except OSError as exc:
         return {"ok": False, "error": str(exc), "lines": []}
@@ -2907,7 +2923,7 @@ def _resolve_mode_defaults(mode: str, db_arg: str | None, port_arg: int | None,
 
 
 def main():
-    global _DB_PATH, _MODE
+    global _DB_PATH, _MODE, _LOG_PATH
     parser = argparse.ArgumentParser(description="MEICAgent Dashboard")
     parser.add_argument("--mode", choices=["live", "paper"], default="live",
                          help="'paper' points the dashboard at data/paper_trades.db and "
@@ -2923,6 +2939,11 @@ def main():
     _DB_PATH, port = _resolve_mode_defaults(args.mode, args.db, args.port)
     # `python dashboard.py` with no args resolves to (today's default meic_trades.db path, 5050)
     # — byte-identical to pre-paper-mode behavior.
+    # The Logs tab tails the mode's own log: the paper session writes logs/paper_loop.log,
+    # the live loop writes logs/agent.log. Without this the paper dashboard showed the (stale)
+    # live log and no paper activity.
+    if args.mode == "paper":
+        _LOG_PATH = _PAPER_LOG_PATH
 
     # Check if already running
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

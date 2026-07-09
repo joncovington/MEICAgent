@@ -43,10 +43,10 @@ per-contract average:
 - **Open** (all 4 legs): $1.00 commission + $0.10 clearing + $0.02 ORF + the per-symbol
   exchange proprietary index fee (SPX $0.60, XSP $0.00 under 10 contracts/leg, NDX $0.25,
   RUT $0.18), per contract, plus $0.00329 FINRA TAF on the 2 sell legs (short put + short call).
-- **Active close** (stop / profit-target / force-close): no commission, but clearing + ORF +
+- **Active close** (per-side stop / force-close): no commission, but clearing + ORF +
   exchange fee + TAF still apply on the legs being closed. A per-side stop closes 2 legs; a
-  full-IC close closes 4.
-- **Expired OTM:** no fees at all — no closing transaction occurs.
+  full-IC close closes 4. (MEIC has no profit-target close.)
+- **Expired / settled:** no fees at all — expiration is not a transaction.
 
 This means a stopped IC correctly pays open+close costs and an expired IC pays open-only,
 which is what makes narrow-width/low-credit setups (e.g. XSP) show realistic — sometimes
@@ -136,10 +136,17 @@ likely overfit), avg-win/avg-loss, max consecutive losses, realized-vs-unrealize
 ## Known limitations
 
 - **No exit-side slippage modeled.** Entries fill conservatively at `ic_natural_bid`; exits
-  (stop, profit-target, force-close) fill at the computed marketable crossing price with no
+  (per-side stop, force-close) fill at the computed marketable crossing price with no
   additional slippage. This is the deliberate base-build scope decision — friction is instead
   absorbed by a **20–40% haircut applied to paper P&L when judging graduation**, and expect
   **live drawdown ~1.5–2× the paper figure**.
+- **Exit model = the MEIC rules.** The engine implements the three iron-condor exits — per-side
+  stop, time-based force-close (non-cash-settled), and left-to-expire cash settlement (cash-
+  settled, at `expiration_settlement_time`: OTM = full credit, ITM = intrinsic capped at the
+  wing) — plus the FOMC/triple-witching event force-closes. There is **no profit-target close**.
+  The one live behavior it does **not** model is the discretionary post-15:00 gamma safety
+  close (an agent-judgment backstop) — consistent with paper being the deterministic mechanical
+  baseline; a cash-settled position the stops don't catch rides to settlement.
 - **Stop-out P&L is the single most optimistic element of the paper model.** Real 0DTE stop
   fills can slip badly on fast moves (documented cases of a stop trigger blowing several
   dollars past its limit); the 120-second loop cadence also samples stops later than a true

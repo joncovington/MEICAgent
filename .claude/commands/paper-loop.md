@@ -8,7 +8,7 @@ As of the standalone runner, the paper loop is implemented in code (`src/paper_l
 python src/paper_loop.py --once
 ```
 
-This runs, for every symbol in `config.json`'s `symbols`, one full pass: fetch the live underlying price + IV rank, the shared VIX / VIX1D (→ ratio, → VIX-banded short delta), and GEX; build wing-width candidates from `wing_widths_by_symbol`; then hand the snapshot to `paper.process_symbol`, which marks/exits every open paper IC across all four profiles (profit-target, per-side stops, and the settlement-aware force-close cascade — including the physically-settled early close + assignment/pin friction) and evaluates new entries per profile. All writes go to `data/paper_trades.db`; the live account and `data/meic_trades.db` are never touched.
+This runs, for every symbol in `config.json`'s `symbols`, one full pass: fetch the live underlying price + IV rank, the shared VIX / VIX1D (→ ratio, → VIX-banded short delta), and GEX; build wing-width candidates from `wing_widths_by_symbol`; then hand the snapshot to `paper.process_symbol`, which marks/exits every open paper IC across all four profiles (per-side stops, the settlement-aware force-close cascade with the physically-settled early close + assignment/pin friction, and cash-settled left-to-expire settlement — no profit target) and evaluates new entries per profile. All writes go to `data/paper_trades.db`; the live account and `data/meic_trades.db` are never touched.
 
 Report the per-symbol, per-profile outcomes from the JSON it prints (fills, skip reasons, or exits).
 

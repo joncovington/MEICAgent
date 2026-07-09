@@ -8,7 +8,7 @@ Run `/meic-start` before 9:30 ET — it launches the dashboard and agent loop in
 /meic-start
 ```
 
-This launches the dashboard as a background process, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 10:00 ET) or after `entry_window_end` (default 14:30 ET), and force-closes everything by `force_close_time` (default 15:45 ET), so starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** to verify the tastytrade broker session is live before any market assessment begins.
+This launches the dashboard as a background process, opens the browser at `http://localhost:5050`, then starts the agent loop. The agent will not enter new trades before `entry_window_start` (default 10:00 ET) or after `entry_window_end` (default 14:30 ET). At end of day it force-closes non-cash-settled positions before the bell (`physical_settlement_force_close_time`/`force_close_time`) and leaves cash-settled positions to expire and settle in cash (`expiration_settlement_time`); either way, starting early is safe. On the first iteration of each trading day, the loop runs a **daily connection check** to verify the tastytrade broker session is live before any market assessment begins.
 
 To start components individually instead:
 

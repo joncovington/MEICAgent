@@ -39,7 +39,7 @@ Every loop iteration classifies the current time into one of these labels (used 
 | 11:30–13:00 | `midday` | Generally good conditions |
 | 13:00–14:30 | `afternoon` | Less time remaining; weigh credit vs. time risk |
 | 14:30–15:30 | `late` | Applies to stop tightening and existing positions; new IC entries are already hard-blocked here by `entry_window_end` (default 14:30) |
-| After 15:30 | — | No new entries; force-close by `force_close_time` (default 15:45) regardless of symbol |
+| After 15:30 | — | No new entries; non-cash-settled symbols force-closed by `physical_settlement_force_close_time`/`force_close_time`, cash-settled left to expire (see EOD handling) |
 
 ---
 
@@ -85,7 +85,7 @@ per-side stop fires when that side's cost reaches:  stop_trigger_ratio × net_cr
 closing limit price:  (short_ask − long_bid) × stop_limit_ratio                        (default 1.02 — prices slightly past the crossing price so it stays marketable)
 ```
 
-At these levels, closing the stopped spread costs approximately the full IC credit, leaving the other spread to continue toward expiration or its own stop/profit target.
+At these levels, closing the stopped spread costs approximately the full IC credit, leaving the other spread to continue toward expiration or its own stop. **MEIC has no profit target** — a spread is never closed simply for being profitable.
 
 Stops are tightened (never loosened) by the agent's judgment as conditions change. Triggers for tightening include:
 
@@ -111,14 +111,19 @@ The agent re-evaluates all partial positions (and stopped positions with remaini
 
 ---
 
-## EOD handling
+## Exit paths (no profit target)
 
-After 15:00 ET, the agent reviews each open spread for unacceptable gamma risk and force-closes any spread where:
-- The underlying is within 0.5% of the short strike with < 30 min remaining
-- Short-strike gamma is above 0.10
-- The spread value is accelerating faster than stops can track
+A MEIC iron condor has exactly three exits — **there is no profit-target close**; a spread is never closed simply for becoming cheap/profitable:
 
-All remaining open legs are force-closed before 15:45 ET regardless of symbol — the agent never intentionally holds a position to expiration. What differs by symbol is how a *missed* force-close is handled: for cash-settled symbols (default: SPX, XSP, NDX, RUT — configurable via `cash_settled_symbols`), a miss still settles in cash automatically, so it's routine remediation. For non-cash-settled symbols (individual equities, and futures options like /MES, /ES, /NQ, /MNQ), a miss risks physical assignment and is escalated as a critical failure with an immediate marketable-limit retry.
+1. **Per-side stop** — a spread side is bought back when its cost reaches `stop_trigger_ratio × net_credit` (see Stop management above). This is the primary risk exit.
+2. **Time-based close before the bell — non-cash-settled symbols only.** Symbols not in `cash_settled_symbols` (individual equities, ETFs like QQQ/IWM/SPY, and futures options /MES, /ES, /NQ, /MNQ) are physically-settled American-style, so any unstopped side is force-closed before the close (`physical_settlement_force_close_time`, default 15:30 ET, backstopped by `force_close_time` 15:45 ET) to avoid share assignment. A *missed* close here risks physical assignment and is escalated as a critical failure with an immediate marketable-limit retry.
+3. **Left to expire — cash-settled symbols.** Symbols in `cash_settled_symbols` (default SPX, XSP, NDX, RUT) are **not** force-closed at EOD. Any side not already stopped is left to expire and settles in cash at `expiration_settlement_time` (16:00 ET): an OTM short expires worthless (full credit retained); an ITM short settles for its intrinsic value, capped at the wing width (defined max loss). No assignment risk, so no critical escalation.
+
+**Discretionary gamma safety close (retained backstop).** In addition to the per-side stops, after 15:00 ET the agent may force-close any spread — regardless of settlement type — showing unacceptable gamma risk: the underlying within ~0.5% of a short strike with < 30 min left, short-strike gamma above ~0.10, or spread value accelerating faster than the software stop can track. This is a judgment-based safety net layered on top of the stops, not a fourth routine exit.
+
+**Event overrides.** On FOMC days (force-close all by `fomc_blackout_start`, 13:30 ET) and triple-witching / quarterly-expiry days (force-close all by 14:00 ET), *every* open position — including cash-settled — is force-closed as a risk override; the expire-to-settlement rule does not apply on those days.
+
+Note: the deterministic paper-trading engine models paths 1–3 and the event overrides, but not the discretionary gamma safety close (that's a live agent-judgment behavior) — see `docs/paper-trading.md`.
 
 ---
 

@@ -61,7 +61,7 @@ def _tt_fees(symbol: str, quantity: int, action: str, sell_legs: int, total_legs
     action:
       "open"   — all 4 legs open; commission + clearing + ORF + exchange fee per contract
                  per leg, plus FINRA TAF on the `sell_legs` (short put + short call = 2).
-      "close"  — an active close (stop, profit-target, or force-close); no commission,
+      "close"  — an active close (a per-side stop or a force-close); no commission,
                  but clearing/ORF/exchange fee/TAF still apply on the legs being closed.
       "expire" — expired OTM; no fees at all (no closing transaction occurs).
     total_legs lets a per-side stop (2 legs: one short + its long wing) fee correctly
@@ -388,28 +388,73 @@ def force_close_active(snapshot: dict, base_config: dict, is_cash_settled: bool)
     if (today in base_config.get("triple_witching_dates_2026", []) or
             today in base_config.get("quarterly_expiry_dates_2026", [])) and now_min >= _time_to_minutes("14:00"):
         return True, "force_close_expiry_event"
-    # Earlier close for physically-settled symbols (assignment/pin risk)
-    if not is_cash_settled and \
-            now_min >= _time_to_minutes(base_config.get("physical_settlement_force_close_time", "15:30")):
-        return True, "force_close_physical_settlement"
-    # General EOD close — all symbols
-    if now_min >= _time_to_minutes(base_config.get("force_close_time", "15:45")):
-        return True, "force_close_eod"
+    # Non-cash-settled symbols (QQQ/IWM/equities/futures) are closed before the bell to avoid
+    # physical assignment — first at the earlier physical deadline, then a 15:45 backstop.
+    # Cash-settled symbols are NOT force-closed here: they are left to expire and settled at
+    # the close (see settlement_active). This is the core of the corrected MEIC exit model.
+    if not is_cash_settled:
+        if now_min >= _time_to_minutes(base_config.get("physical_settlement_force_close_time", "15:30")):
+            return True, "force_close_physical_settlement"
+        if now_min >= _time_to_minutes(base_config.get("force_close_time", "15:45")):
+            return True, "force_close_eod"
     return False, None
+
+
+def settlement_active(snapshot: dict, base_config: dict, is_cash_settled: bool) -> bool:
+    """True when a cash-settled position should be settled at expiration (0DTE PM settlement
+    at the close). This is the 'left to expire' exit path — the position is not bought back;
+    its P&L is the credit minus any ITM intrinsic at the settlement price (capped at the wing
+    width). Non-cash-settled symbols never reach here — they are force-closed before the bell."""
+    if not is_cash_settled:
+        return False
+    now_min = _time_to_minutes(snapshot["now_et"])
+    return now_min >= _time_to_minutes(base_config.get("expiration_settlement_time", "16:00"))
+
+
+def _settlement_value(strike, underlying, wing_width, side) -> float:
+    """The value a defined-risk spread settles for at expiration: the short strike's intrinsic
+    value, floored at 0 (expires worthless) and capped at the wing width (fully-ITM = max
+    loss). Used for the cash-settled 'left to expire' path."""
+    if strike is None or underlying is None:
+        return 0.0
+    intrinsic = (strike - underlying) if side == "put" else (underlying - strike)
+    return round(min(max(intrinsic, 0.0), wing_width or 0.0), 4)
 
 
 def evaluate_open_trade(trade: dict, leg_quotes: dict, params: dict, force_close: bool,
                         underlying_price: float | None = None, is_cash_settled: bool = True,
-                        force_close_reason: str = "force_close_eod") -> dict:
-    """Mark-to-market one open paper IC and decide profit-target / per-side stop / force-close.
+                        force_close_reason: str = "force_close_eod", settle: bool = False) -> dict:
+    """Mark-to-market one open paper IC and decide its exit (MEIC has no profit target).
 
     leg_quotes: {streamer_symbol: {"bid":.., "ask":.., "mid":..}} for this trade's 4 legs,
     taken from the snapshot's per-symbol quote set.
+    force_close / settle: set by process_symbol from force_close_active / settlement_active.
 
-    Returns a dict describing the action: {"action": "hold"|"profit_target"|"stop_put"|
-    "stop_call"|"stop_both"|"force_close", ...pricing...}. The caller (process_symbol)
-    applies the action to the DB.
+    Returns a dict describing the action: {"action": "hold"|"stop_put"|"stop_call"|"stop_both"|
+    "force_close"|"expire", ...pricing...}. The caller (process_symbol) applies it to the DB.
     """
+    # A side is still open only if it hasn't already been closed. In paper, a closed side is
+    # marked by its recorded stop cost (put_stop_cost / call_stop_cost) — the live-only
+    # *_stop_order_id fields are never set here, so keying off them would re-stop an
+    # already-stopped side on every subsequent iteration and double-count its P&L.
+    put_open = trade["status"] in ("open", "partial") and trade.get("put_stop_cost") is None
+    call_open = trade["status"] in ("open", "partial") and trade.get("call_stop_cost") is None
+
+    # Expiration settlement ('left to expire', cash-settled) needs only the strikes and the
+    # settlement price — not live leg quotes — so handle it before the quote-availability gate
+    # so a missing quote at the close can't strand an expiring position. force_close (events /
+    # non-cash) takes precedence since it fires earlier in the day.
+    if settle and not force_close:
+        return {
+            "action": "expire",
+            "put_open": put_open,
+            "call_open": call_open,
+            "put_exit_price": _settlement_value(trade.get("put_strike"), underlying_price,
+                                                trade.get("wing_width"), "put") if put_open else None,
+            "call_exit_price": _settlement_value(trade.get("call_strike"), underlying_price,
+                                                 trade.get("wing_width"), "call") if call_open else None,
+        }
+
     sq = leg_quotes.get(trade["put_symbol"])
     cq = leg_quotes.get(trade["call_symbol"])
     lpq = leg_quotes.get(trade["long_put_symbol"])
@@ -418,21 +463,8 @@ def evaluate_open_trade(trade: dict, leg_quotes: dict, params: dict, force_close
         return {"action": "hold", "reason": "quotes_unavailable"}
 
     net_credit = trade["net_credit"]
-    # A side is still open only if it hasn't already been closed. In paper, a closed side is
-    # marked by its recorded stop cost (put_stop_cost / call_stop_cost) — the live-only
-    # *_stop_order_id fields are never set here, so keying off them would re-stop an
-    # already-stopped side on every subsequent iteration and double-count its P&L.
-    put_open = trade["status"] in ("open", "partial") and trade.get("put_stop_cost") is None
-    call_open = trade["status"] in ("open", "partial") and trade.get("call_stop_cost") is None
-
-    ic_current_cost_mid = (sq["mid"] + cq["mid"]) - (lpq["mid"] + lcq["mid"])
-    if trade["status"] == "open" and ic_current_cost_mid <= params.get("profit_target_pct", 0.50) * net_credit:
-        return {
-            "action": "profit_target",
-            "put_exit_price": max(sq["bid"] - lpq["ask"], 0),
-            "call_exit_price": max(cq["bid"] - lcq["ask"], 0),
-        }
-
+    # MEIC has no profit target: an iron condor is only ever closed by a per-side stop, a
+    # (non-cash-settled) time-based force-close, or an event force-close. See docs/strategy.md.
     if force_close:
         put_exit = max(sq["bid"] - lpq["ask"], 0) if put_open else None
         call_exit = max(cq["bid"] - lcq["ask"], 0) if call_open else None
@@ -536,6 +568,7 @@ def process_symbol(snapshot: dict, db_path: str, execution_mode: str, profiles_f
     symbol = snapshot["symbol"]
     is_cash = _is_cash_settled(symbol, base_config)
     force_close, force_close_reason = force_close_active(snapshot, base_config, is_cash)
+    settle = settlement_active(snapshot, base_config, is_cash)
     underlying_price = snapshot.get("underlying_price")
     leg_quotes = snapshot.get("leg_quotes", {})
 
@@ -549,7 +582,8 @@ def process_symbol(snapshot: dict, db_path: str, execution_mode: str, profiles_f
             decision = evaluate_open_trade(trade, leg_quotes, params, force_close,
                                            underlying_price=underlying_price,
                                            is_cash_settled=is_cash,
-                                           force_close_reason=force_close_reason)
+                                           force_close_reason=force_close_reason,
+                                           settle=settle)
             actions.append({"ic_order_id": trade["ic_order_id"], "decision": decision})
             _apply_exit_decision(trade, decision, symbol, db_path)
 
@@ -583,20 +617,26 @@ def _apply_exit_decision(trade: dict, decision: dict, symbol: str, db_path: str)
     if action == "hold":
         return
 
-    if action == "profit_target":
-        put_pnl = round((trade["put_credit"] - decision["put_exit_price"]) * mult, 2)
-        call_pnl = round((trade["call_credit"] - decision["call_exit_price"]) * mult, 2)
-        fee = close_fees_full_ic(symbol)
-        total_pnl = put_pnl + call_pnl
-        _db(["record_leg_exit", "--ic_order_id", ic_order_id, "--side", "put",
-             "--status", "expired", "--exit_time", now, "--exit_reason", "profit_target_50pct",
-             "--exit_price", str(decision["put_exit_price"]), "--pnl", str(put_pnl)], db_path)
-        _db(["record_leg_exit", "--ic_order_id", ic_order_id, "--side", "call",
-             "--status", "expired", "--exit_time", now, "--exit_reason", "profit_target_50pct",
-             "--exit_price", str(decision["call_exit_price"]), "--pnl", str(call_pnl)], db_path)
+    if action == "expire":
+        # Cash-settled 'left to expire': settle each still-open side at its intrinsic value
+        # (already capped at the wing width). No fees — expiration is not a transaction.
+        existing_pnl = trade.get("pnl") or 0
+        delta_pnl = 0
+        if decision["put_open"]:
+            put_pnl = round((trade["put_credit"] - decision["put_exit_price"]) * mult, 2)
+            delta_pnl += put_pnl
+            _db(["record_leg_exit", "--ic_order_id", ic_order_id, "--side", "put",
+                 "--status", "expired", "--exit_time", now, "--exit_reason", "expired_settlement",
+                 "--exit_price", str(decision["put_exit_price"]), "--pnl", str(put_pnl)], db_path)
+        if decision["call_open"]:
+            call_pnl = round((trade["call_credit"] - decision["call_exit_price"]) * mult, 2)
+            delta_pnl += call_pnl
+            _db(["record_leg_exit", "--ic_order_id", ic_order_id, "--side", "call",
+                 "--status", "expired", "--exit_time", now, "--exit_reason", "expired_settlement",
+                 "--exit_price", str(decision["call_exit_price"]), "--pnl", str(call_pnl)], db_path)
         _update_trade(ic_order_id, {
-            "status": "closed_profit_target", "exit_time": now,
-            "exit_reason": "profit_target_50pct", "pnl": total_pnl, "fees": trade.get("fees", 0) + fee,
+            "status": "expired", "exit_time": now, "exit_reason": "expired_settlement",
+            "pnl": existing_pnl + delta_pnl,
         }, db_path)
         return
 

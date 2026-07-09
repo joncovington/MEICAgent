@@ -297,16 +297,74 @@ def test_synthetic_entry_fill_records_natural_bid_as_net_credit():
     assert row["fees"] == pytest.approx(paper.open_fees("XSP", 1), abs=0.001)
 
 
-def test_evaluate_open_trade_profit_target_fires_at_or_below_threshold():
+def test_evaluate_open_trade_no_profit_target_holds_a_cheap_ic():
+    # MEIC has no profit target: even a deeply-profitable IC (cost far below 50% of credit) is
+    # NOT closed early — it holds until a stop, force-close, or expiration.
     trade = {"put_symbol": "SP", "call_symbol": "SC", "long_put_symbol": "LP", "long_call_symbol": "LC",
-              "net_credit": 0.58, "status": "open", "put_credit": 0.30, "call_credit": 0.28,
-              "stop_trigger_current": 0.93, "stop_limit_current": 1.02}
+             "net_credit": 0.58, "status": "open", "put_credit": 0.30, "call_credit": 0.28,
+             "stop_trigger_current": 0.93, "stop_limit_current": 1.02}
     leg_quotes = {
         "SP": {"bid": 0.10, "ask": 0.15, "mid": 0.125}, "LP": {"bid": 0.02, "ask": 0.05, "mid": 0.035},
         "SC": {"bid": 0.08, "ask": 0.12, "mid": 0.10}, "LC": {"bid": 0.02, "ask": 0.04, "mid": 0.03},
     }
     decision = paper.evaluate_open_trade(trade, leg_quotes, _params(MODERATE), force_close=False)
-    assert decision["action"] == "profit_target"
+    assert decision["action"] == "hold"
+
+
+def _expiring_trade():
+    return {"put_symbol": "SP", "call_symbol": "SC", "long_put_symbol": "LP", "long_call_symbol": "LC",
+            "net_credit": 0.58, "status": "open", "put_credit": 0.30, "call_credit": 0.28,
+            "put_strike": 7480.0, "call_strike": 7520.0, "wing_width": 10.0,
+            "put_stop_cost": None, "call_stop_cost": None}
+
+
+def test_settlement_value_otm_zero_itm_capped():
+    # put: ITM when underlying < strike; capped at wing
+    assert paper._settlement_value(7480, 7500, 10, "put") == 0.0          # OTM
+    assert paper._settlement_value(7480, 7475, 10, "put") == 5.0          # 5 ITM
+    assert paper._settlement_value(7480, 7400, 10, "put") == 10.0         # deep ITM → wing cap
+    assert paper._settlement_value(7520, 7500, 10, "call") == 0.0         # OTM
+    assert paper._settlement_value(7520, 7526, 10, "call") == 6.0         # 6 ITM
+
+
+def test_expire_both_otm_keeps_full_credit():
+    # underlying 7500 between the shorts (7480 put / 7520 call) → both expire worthless
+    d = paper.evaluate_open_trade(_expiring_trade(), {}, _params(MODERATE), force_close=False,
+                                  underlying_price=7500.0, is_cash_settled=True, settle=True)
+    assert d["action"] == "expire"
+    assert d["put_exit_price"] == 0.0 and d["call_exit_price"] == 0.0  # full credit retained
+
+
+def test_expire_itm_call_settles_for_intrinsic():
+    # underlying 7526 → call ITM by 6, put OTM
+    d = paper.evaluate_open_trade(_expiring_trade(), {}, _params(MODERATE), force_close=False,
+                                  underlying_price=7526.0, is_cash_settled=True, settle=True)
+    assert d["action"] == "expire"
+    assert d["put_exit_price"] == 0.0
+    assert d["call_exit_price"] == 6.0  # call side settles for 6 (< wing 10)
+
+
+def test_expire_only_settles_the_still_open_side():
+    # call already stopped (call_stop_cost set) → settlement touches only the put side
+    trade = _expiring_trade()
+    trade["status"] = "partial"
+    trade["call_stop_cost"] = 0.55
+    d = paper.evaluate_open_trade(trade, {}, _params(MODERATE), force_close=False,
+                                  underlying_price=7500.0, is_cash_settled=True, settle=True)
+    assert d["action"] == "expire"
+    assert d["put_open"] is True and d["call_open"] is False
+    assert d["call_exit_price"] is None
+
+
+def test_force_close_takes_precedence_over_settlement():
+    # On an event day both could be true; force_close must win (it fires earlier in the day).
+    trade = _expiring_trade()
+    lq = {"SP": {"bid": 0.2, "ask": 0.3, "mid": 0.25}, "LP": {"bid": 0.05, "ask": 0.1, "mid": 0.075},
+          "SC": {"bid": 0.2, "ask": 0.3, "mid": 0.25}, "LC": {"bid": 0.05, "ask": 0.1, "mid": 0.075}}
+    d = paper.evaluate_open_trade(trade, lq, _params(MODERATE), force_close=True,
+                                  underlying_price=7500.0, is_cash_settled=True, settle=True,
+                                  force_close_reason="force_close_fomc")
+    assert d["action"] == "force_close" and d["reason"] == "force_close_fomc"
 
 
 def test_evaluate_open_trade_holds_when_nothing_triggers():
@@ -436,12 +494,31 @@ def test_force_close_active_physical_earlier_than_cash():
     assert active_cash is False and reason_cash is None
 
 
-def test_force_close_active_general_eod_all_symbols():
-    for is_cash in (True, False):
-        active, reason = paper.force_close_active(_snap("15:46"), BASE_CONFIG, is_cash_settled=is_cash)
-        assert active is True
-        # physical trips the earlier physical reason; cash trips the eod reason
-        assert reason in ("force_close_physical_settlement", "force_close_eod")
+def test_force_close_active_eod_closes_noncash_but_not_cash():
+    # At 15:46 the non-cash-settled symbol is force-closed (physical, or the 15:45 backstop),
+    # but the cash-settled symbol is NOT — it is left to expire and settled at the close.
+    active_noncash, reason_noncash = paper.force_close_active(_snap("15:46"), BASE_CONFIG, is_cash_settled=False)
+    active_cash, reason_cash = paper.force_close_active(_snap("15:46"), BASE_CONFIG, is_cash_settled=True)
+    assert active_noncash is True and reason_noncash in ("force_close_physical_settlement", "force_close_eod")
+    assert active_cash is False and reason_cash is None
+
+
+def test_settlement_active_cash_settled_at_close_only():
+    assert paper.settlement_active(_snap("16:00"), BASE_CONFIG, is_cash_settled=True) is True
+    assert paper.settlement_active(_snap("15:59"), BASE_CONFIG, is_cash_settled=True) is False
+    # Non-cash-settled symbols are never settled — they are force-closed before the bell.
+    assert paper.settlement_active(_snap("16:00"), BASE_CONFIG, is_cash_settled=False) is False
+
+
+def test_events_still_force_close_cash_settled():
+    # FOMC (13:30) and quarterly/triple-witching (14:00) remain hard overrides for ALL symbols,
+    # including cash-settled — they do not get the 'left to expire' treatment on those days.
+    fomc = BASE_CONFIG["fomc_dates_2026"][0]
+    q = BASE_CONFIG["quarterly_expiry_dates_2026"][0]
+    a1, r1 = paper.force_close_active(_snap("13:35", date=fomc), BASE_CONFIG, is_cash_settled=True)
+    a2, r2 = paper.force_close_active(_snap("14:05", date=q), BASE_CONFIG, is_cash_settled=True)
+    assert a1 is True and r1 == "force_close_fomc"
+    assert a2 is True and r2 == "force_close_expiry_event"
 
 
 def test_force_close_active_fomc_blackout():

@@ -328,7 +328,11 @@ def _is_trading_time(now, cfg):
     if now.strftime("%Y-%m-%d") in holidays:
         return False
     mins = now.hour * 60 + now.minute
-    return 9 * 60 + 30 <= mins < 16 * 60
+    # Runs 09:30 through 16:05 — the extra 5 min past the 16:00 close lets the settlement pass
+    # fire so cash-settled positions left to expire get settled at the close (paper.settlement_
+    # active fires at expiration_settlement_time, default 16:00). Entries are independently
+    # blocked after entry_window_end (14:30), so the extension only affects marking/settlement.
+    return 9 * 60 + 30 <= mins < 16 * 60 + 5
 
 
 def _sleep_seconds(now, cfg, open_positions):

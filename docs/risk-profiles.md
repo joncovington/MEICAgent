@@ -98,7 +98,7 @@ The four tiers follow a deliberate sequence. **Do not skip ahead** — the inter
 
 1. **Start at conservative** if you're new, uncertain, or just traded out of a drawdown.
 2. **Move to moderate** after 2–4 weeks when you've observed: entry rejection reasons in your logs, which 2–3 gates block most entries, and whether your per-trade win rate stays 60%+ on your entries.
-3. **Escalate to aggressive** only if: moderate's ~3 ICs/day felt sustainable, you hit profit targets regularly, and your largest losses didn't exceed 2% of account equity. Aggressive **requires active stop management** — do not set it and forget it.
+3. **Escalate to aggressive** only if: moderate's ~3 ICs/day felt sustainable, most days closed green (ICs expiring/settling for a profit rather than getting stopped), and your largest losses didn't exceed 2% of account equity. Aggressive **requires active stop management** — do not set it and forget it.
 4. **Reach very-aggressive only deliberately**, after running aggressive for 2+ weeks. This tier is for live-testing high-VIX/ATR tactics, not a normal mode. Plan a short experiment (1 week) with explicit drawdown limits before committing.
 
 ### What each relaxation costs

@@ -16,7 +16,7 @@ For **each symbol in `config.json`'s `symbols`** (SPX, XSP, NDX, RUT — same un
 2. Get VIX and VIX1D once per iteration (shared across symbols, same as the live loop's Step 4a): `python src/tt.py get_vix1d`. Compute `vix1d_ratio = vix1d / vix`.
 3. Get this symbol's 5-day ATR (from prior loop history or the chain, same source the live loop uses).
 4. Get GEX: `python src/tt.py get_gex --symbol <SYM>`. If `ok` is false, set `snapshot["gex"] = {"ok": false}` and continue — do not block on missing GEX.
-5. **Fetch multiple wing-width candidates** — this is the key difference from the live loop's single-scan approach, since the deterministic engine needs to pick the widest candidate that clears each profile's own credit floor. For each width in a reasonable shortlist up to `max_wing_width` (e.g. `[2, 5, 10]` for SPX/NDX/RUT, `[1, 2, 5]` for XSP — narrower default set than SPX since XSP's strikes are ~10x tighter), call:
+5. **Fetch multiple wing-width candidates** — this is the key difference from the live loop's single-scan approach, since the deterministic engine needs to pick the widest candidate that clears each profile's own credit floor. Use this symbol's entry from `wing_widths_by_symbol` in `config.json` (falling back to its `DEFAULT` list) — e.g. `[5, 10]` for SPX/QQQ, `[1, 2, 5]` for XSP, `[2, 5]` for IWM. These are set per instrument because wing width is dollar-denominated risk (10 points is ~0.13% of SPX but ~3.4% of IWM). For each width in the list, call:
    ```bash
    python src/tt.py get_strategies --symbol <SYM> --short_delta <vix_banded_delta_target> --wing_width <width> --around_price <last>
    ```

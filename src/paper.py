@@ -161,7 +161,11 @@ def evaluate_entry(snapshot: dict, params: dict, open_ics: list) -> tuple:
     if vix1d_ratio is not None and vix1d_ratio > params.get("regime_vix1d_ratio_pause_threshold", 1.30):
         return False, "regime_vix1d_ratio_elevated", None
     atr = snapshot.get("atr_5day")
-    if atr is not None and atr > params["regime_atr_pause_threshold"]:
+    atr_underlying = snapshot.get("underlying_price")
+    # ATR gate is percentage-based (5-day ATR as a fraction of spot) so one threshold means
+    # the same "elevated realized vol" across symbols spanning ~297 (IWM) to ~7500 (SPX) — a
+    # fixed points threshold silently over-blocked SPX and never fired for QQQ/IWM.
+    if atr is not None and atr_underlying and (atr / atr_underlying) > params["regime_atr_pause_threshold_pct"]:
         return False, "regime_atr_elevated", None
     gex = snapshot.get("gex") or {}
     if gex.get("ok") and gex.get("gex_positive") is False:

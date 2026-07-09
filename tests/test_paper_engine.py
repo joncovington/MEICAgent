@@ -166,6 +166,25 @@ def test_evaluate_entry_rejects_max_concurrent_ics_reached():
     assert reason == "max_concurrent_ics_reached"
 
 
+def test_evaluate_entry_atr_gate_is_percentage_based():
+    # 590-priced symbol: ATR of 12 pts = 2.03% > conservative's 1.5% threshold → paused
+    snap = _base_snapshot(now_et="13:00", atr_5day=12.0, underlying_price=590.0)
+    entered, reason, _ = paper.evaluate_entry(snap, _params(CONSERVATIVE), [])
+    assert entered is False
+    assert reason == "regime_atr_elevated"
+
+
+def test_evaluate_entry_atr_gate_scales_with_price_level():
+    # The SAME 12-point ATR on a 7500-priced symbol (SPX-like) is only 0.16% — well under
+    # the 1.5% threshold, so it must NOT pause. This is the exact bug the pct conversion fixes:
+    # a fixed points threshold either over-blocked SPX or never fired for low-priced symbols.
+    snap = _base_snapshot(now_et="13:00", atr_5day=12.0, underlying_price=7500.0,
+                           candidates=[_candidate(5, 7380, 7560, sp_delta=-0.15, sc_delta=0.15)])
+    entered, reason, _ = paper.evaluate_entry(snap, _params(CONSERVATIVE), [])
+    # ATR gate does not fire here (0.16% < 1.5%); entry proceeds past the regime gate
+    assert reason != "regime_atr_elevated"
+
+
 def test_evaluate_entry_rejects_strike_overlap_and_tries_narrower_candidate():
     # Open IC holds the 583/598 strikes used by the 5-wide candidate; the 2-wide candidate
     # (same strikes in this fixture) also overlaps, so no candidate clears.

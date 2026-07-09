@@ -14,6 +14,14 @@
   "_delta_target_vix_bands_note": "VIX <= vix_band_low_max (18): delta_target_vix_low (0.16). VIX <= vix_band_elevated_max (25): delta_target_vix_elevated (0.14). VIX <= vix_band_high_max (35): delta_target_vix_high (0.12). VIX > vix_band_high_max: delta_target_vix_crisis (0.10) -- note VIX > regime_vix_pause_threshold (25) already pauses new IC entries account-wide, so the high/crisis bands mostly affect what a scan *would* have targeted, not what actually gets entered; kept for consistency and for ORB debit-spread strike selection, which isn't blocked by the VIX regime gate. Documented trader convention (VIX-regime delta scaling), not a backtested-optimal breakpoint set for this specific strategy -- treat as a reasoned starting point, not a proven-optimal one.",
   "max_wing_width": 10,
   "_max_wing_width_note": "Upper bound (points) on spread width; the agent chooses the actual wing width per entry (any reasonable value up to this max) based on credit, buying power, and session conditions rather than scanning a fixed list.",
+  "wing_widths_by_symbol": {
+    "SPX": [5, 10],
+    "XSP": [1, 2, 5],
+    "QQQ": [5, 10],
+    "IWM": [2, 5],
+    "DEFAULT": [2, 5, 10]
+  },
+  "_wing_widths_by_symbol_note": "Per-symbol IC wing-width candidate shortlist (points), scanned widest-first. Wing width is a dollar-denominated risk parameter, so it must be set per instrument rather than shared across price levels: 10 points is ~0.13% of SPX (~7500) but ~3.4% of IWM (~297). Values respect each symbol's strike increment and stay within max_wing_width. DEFAULT covers any symbol not listed.",
   "quantity": 1,
   "cash_settled_symbols": ["SPX", "XSP", "NDX", "RUT"],
   "_cash_settled_symbols_note": "Symbols that settle in cash at expiration. All positions are force-closed at force_close_time regardless of membership here — this list only controls whether a missed force-close is escalated as a critical assignment-risk failure (symbol not listed) or routine cash-settlement remediation (symbol listed). Leave any equity or physically-settled symbol you add to 'symbols' out of this list.",
@@ -99,7 +107,8 @@
   "regime_vix1d_ratio_pause_threshold": 1.30,
   "_regime_vix1d_ratio_note": "vix1d / vix ratio, computed once per iteration in Step 4a (market-wide, like VIX -- not symbol-specific). Documented trader convention: ratio >= 1.0 is an 'expansion day' (above-average move priced in), >= 1.30 is an 'event day' (Fed/CPI/shock priced in -- not the environment for short premium without substantial width and reduced size), <= 0.75 is a 'compression day'. 1.30 is used here as the IC-entry pause threshold, same role as regime_vix_pause_threshold but a same-day-specific signal rather than a 30-day-window one. Not independently backtested for this strategy -- a reasoned starting point from documented convention, not a proven-optimal breakpoint.",
   "regime_atr_lookback_days": 5,
-  "regime_atr_pause_threshold": 30.0,
+  "regime_atr_pause_threshold_pct": 0.015,
+  "_regime_atr_pause_threshold_pct_note": "Pause IC entries when a symbol's 5-day ATR exceeds this fraction of its underlying price (0.015 = 1.5%). Percentage-based so it means the same 'elevated realized vol' across every symbol — a fixed points threshold silently broke when symbols span 297 (IWM) to 7500 (SPX). ORB entries remain eligible when this pauses ICs.",
   "late_entry_bias_enabled": true,
   "late_entry_bias_iv_rank_max": 0.45,
   "late_entry_bias_start_time": "12:00",
@@ -108,7 +117,14 @@
   "orb_enabled": true,
   "orb_range_minutes": 5,
   "orb_breakout_threshold_pct": 0.005,
-  "orb_wing_width": 20,
+  "orb_wing_width_by_symbol": {
+    "SPX": 20,
+    "XSP": 2,
+    "QQQ": 10,
+    "IWM": 5,
+    "DEFAULT": 20
+  },
+  "_orb_wing_width_by_symbol_note": "Per-symbol ORB debit-spread wing width (points). Like wing_widths_by_symbol, must scale per instrument — 20 points is 0.27% of SPX but 6.7% of IWM. DEFAULT covers any symbol not listed.",
   "orb_entry_window_end": "12:00",
   "orb_profit_target_pct": 1.00,
   "orb_stop_loss_pct": 0.50,
@@ -123,7 +139,8 @@
   ],
   "quarterly_expiry_skip_open_volatile": true,
   "quarterly_expiry_min_call_otm_pct": 0.0067,
-  "quarterly_expiry_max_intraday_range": 35.0,
+  "quarterly_expiry_max_intraday_range_pct": 0.005,
+  "_quarterly_expiry_max_intraday_range_pct_note": "Halt new entries on quarterly-expiry dates once the underlying's intraday range (high-low) exceeds this fraction of its price (0.005 = 0.5%). Percentage-based so it scales across symbols; replaces the old fixed 35-point value that only made sense for SPX.",
 
   "fomc_header": "===== FOMC Calendar & Blackout =====",
   "fomc_dates_2026": [

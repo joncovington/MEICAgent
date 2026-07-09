@@ -21,7 +21,7 @@ Each profile bundles gate-threshold changes with offsetting position-sizing and 
 | `min_put_otm_pct` | 0.30% | Puts must be 0.30%+ below spot |
 | `late_entry_bias_start_time` | 12:00 | Don't enter before noon on borderline-IV days |
 | `regime_vix_pause_threshold` | 25 | Pause ICs when VIX > 25 |
-| `regime_atr_pause_threshold` | 30.0 | Pause ICs when 5-day ATR > 30 pts |
+| `regime_atr_pause_threshold_pct` | 0.015 | Pause ICs when 5-day ATR > 1.5% of underlying |
 | `max_concurrent_ics` | 4 | Allow up to 4 simultaneous ICs |
 | `stop_trigger_ratio` | 0.95 | Stop at 95% of credit received (loose stop) |
 | `daily_ic_trade_target` | 2 | Target 2 ICs/day |
@@ -77,7 +77,7 @@ Each profile bundles gate-threshold changes with offsetting position-sizing and 
 | Tier 1 + 2 gates | (all carry forward) | All relaxations from moderate + aggressive stay in place |
 | `min_iv_rank` | 0.20 → **0.15** | Accept IV rank down to 15% — skipping the market's quietest conditions |
 | `regime_vix_pause_threshold` | 25 → **30** | **Trade when VIX 25–30** (normally paused for IC) — dealer short-gamma conditions, normally avoid; now accepted with extreme position discipline |
-| `regime_atr_pause_threshold` | 30.0 → **40.0** | **Trade when 5-day ATR 30–40 pts** (normally paused) — trending/volatile markets where mean-reversion edge weakens, now accepted |
+| `regime_atr_pause_threshold_pct` | 0.015 → **0.020** | **Trade when 5-day ATR 1.5–2.0% of underlying** (normally paused) — trending/volatile markets where mean-reversion edge weakens, now accepted |
 | `max_call_delta_entry` | 0.22 → **0.24** | Accept calls 20% closer to ATM than conservative |
 | `min_call_otm_pct` | 0.30% → **0.25%** | Calls only 0.25% OTM |
 | `min_put_otm_pct` | 0.25% → **0.20%** | Puts only 0.20% OTM |

@@ -124,8 +124,8 @@ def test_very_aggressive_profile_relaxes_regime_gates(sample_risk_profiles):
     assert very_aggressive["regime_vix_pause_threshold"] > aggressive["regime_vix_pause_threshold"]
     assert very_aggressive["regime_vix_pause_threshold"] == 30
 
-    assert very_aggressive["regime_atr_pause_threshold"] > aggressive["regime_atr_pause_threshold"]
-    assert very_aggressive["regime_atr_pause_threshold"] == 40.0
+    assert very_aggressive["regime_atr_pause_threshold_pct"] > aggressive["regime_atr_pause_threshold_pct"]
+    assert very_aggressive["regime_atr_pause_threshold_pct"] == 0.020
 
     # Offsets should be extreme
     assert very_aggressive["max_concurrent_ics"] == 2  # Smallest position cap
@@ -151,7 +151,7 @@ def test_all_profiles_have_required_gate_keys(sample_risk_profiles):
         "late_entry_bias_iv_rank_max",
         "late_entry_bias_start_time",
         "regime_vix_pause_threshold",
-        "regime_atr_pause_threshold",
+        "regime_atr_pause_threshold_pct",
         "regime_vix1d_ratio_pause_threshold",
         "max_concurrent_ics",
         "stop_trigger_ratio",
@@ -182,7 +182,7 @@ def test_profile_gate_values_are_valid_types(sample_risk_profiles):
             "max_call_delta_entry_open_volatile", "max_call_delta_entry_late",
             "min_call_otm_pct", "min_put_otm_pct", "late_entry_bias_iv_rank_max",
             "regime_vix1d_ratio_pause_threshold", "stop_trigger_ratio",
-            "regime_atr_pause_threshold"
+            "regime_atr_pause_threshold_pct"
         ]
 
         for gate in float_gates:

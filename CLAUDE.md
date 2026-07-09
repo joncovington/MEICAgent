@@ -23,6 +23,12 @@ CRITICAL_GUARDRAIL: DO NOT WRITE CODE IN THIS FILE
 > - **NEVER** log or display account numbers. **Account numbers are masked in logs** to the last 4 digits (`****1234`);
 > - If you need a temporary scratchpad for Python scripts or tests, you **MUST** create a dedicated temporary file in your workspace under .tmp/ and delete it when finished.
 
+> ⚠️ **CRITICAL INSTRUCTION**: This repo runs correctly on any machine/OS, not just the dev machine.
+> - **NEVER** hardcode absolute paths (e.g. `C:\Users\...`, `/Users/...`). Build paths relative to file location (`Path(__file__).resolve().parent...`) or from config/environment.
+> - **NEVER** save working files/tests to root — use `/src`, `/tests`, `/docs`, `/config`
+> - **NEVER** hardcode machine-specific details (username, hostname except `127.0.0.1`/`localhost`, drive letters)
+> - Before committing new path-construction code, verify it uses `Path(__file__)`, env var, or config value — never a literal machine path.
+
 ## Documentation & Commit Rules
 - Do not mention Claude, Anthropic, or AI tools in the README.md or any other documentation file.
 - Write all documentation and pull request descriptions from a human developer's perspective.
@@ -271,3 +277,13 @@ After completing Step 8, schedule the next wakeup using these intervals:
 | Market hours with one or more open positions | **120s** |
 
 Use the longest applicable interval.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships. **Optional tooling** — not installed by cloning this repo; `graphify-out/` and the hooks that call it are gitignored/local-only, so a fresh checkout on another machine has neither.
+
+- **Before using any `graphify` command, confirm it's available**: check that graphify-out/graph.json exists AND a `graphify` invocation succeeds (e.g. `graphify --help`). If either check fails — command not found, or no graph.json — skip straight to normal tools (Grep/Glob/Read) for this session and do not retry graphify commands later in the same session.
+- If available: for codebase questions, first run `graphify query "<question>"`. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost) — skip silently if graphify isn't available.

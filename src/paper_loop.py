@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 try:
@@ -79,7 +80,8 @@ def _emit(obj):
 
 def _setup_logging(console: bool = True):
     _LOG_FILE.parent.mkdir(exist_ok=True)
-    handlers = [logging.FileHandler(_LOG_FILE, encoding="utf-8")]
+    # Rotate so the log can't grow without bound (10 MB x 5 backups).
+    handlers = [RotatingFileHandler(_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")]
     # A detached, hidden-window process (Start-Process -WindowStyle Hidden) can have an
     # invalid stdout; writing to it via a StreamHandler risks killing the daemon. Only attach
     # the console handler for interactive/--once runs where stdout is real.

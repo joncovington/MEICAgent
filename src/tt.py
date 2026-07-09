@@ -52,7 +52,9 @@ _LOG_FILE.parent.mkdir(exist_ok=True)
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logger.setLevel(logging.WARNING)
-    _fh = logging.FileHandler(_LOG_FILE)
+    # Rotate so the log can't grow without bound (10 MB x 5 backups).
+    from logging.handlers import RotatingFileHandler
+    _fh = RotatingFileHandler(_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
     _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(_fh)
 

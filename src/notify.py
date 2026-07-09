@@ -10,6 +10,29 @@ _ROOT = os.path.dirname(os.path.dirname(__file__))
 _LOG_DIR = os.path.join(_ROOT, "logs")
 _LOG_PATH = os.path.join(_LOG_DIR, "agent.log")
 
+# agent.log is appended to directly (not via the logging module, which we don't want to
+# reconfigure per subprocess), so rotation is done by hand here: when the file passes the cap,
+# shift agent.log -> .1 -> ... -> .5 (dropping the oldest), matching RotatingFileHandler's
+# scheme used by the streamer / paper-loop / tt logs.
+_MAX_BYTES = 10 * 1024 * 1024
+_BACKUPS = 5
+
+
+def _rotate_if_needed():
+    try:
+        if os.path.getsize(_LOG_PATH) < _MAX_BYTES:
+            return
+    except OSError:
+        return  # file doesn't exist yet — nothing to rotate
+    for i in range(_BACKUPS - 1, 0, -1):
+        src = f"{_LOG_PATH}.{i}"
+        if os.path.exists(src):
+            os.replace(src, f"{_LOG_PATH}.{i + 1}")
+    try:
+        os.replace(_LOG_PATH, f"{_LOG_PATH}.1")
+    except OSError:
+        pass
+
 
 def _now_iso():
     try:
@@ -27,6 +50,7 @@ def _out(data):
 
 def _log_event_internal(level, message, data=None):
     os.makedirs(_LOG_DIR, exist_ok=True)
+    _rotate_if_needed()
     entry = {"timestamp": _now_iso(), "level": level, "message": message}
     if data:
         entry["data"] = data

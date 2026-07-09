@@ -51,9 +51,15 @@ except ImportError:
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 _DB_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "meic_trades.db")
+_PAPER_DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "paper_trades.db")
 _CACHE_DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "stream_cache.db")
 _CONFIG_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json")
 _LOG_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "agent.log")
+# "live" (default, data/meic_trades.db) or "paper" (data/paper_trades.db) — set from --mode
+# in main(). Drives the PAPER MODE banner; _DB_PATH itself is the only thing that changes
+# which data actually gets served. _CACHE_DB_PATH (the streamer cache) is never mode-dependent
+# — paper trading marks positions from the same real streamer quotes live trading uses.
+_MODE = "live"
 
 
 def _connect() -> sqlite3.Connection:
@@ -182,6 +188,147 @@ def _stats_for_period(conn: sqlite3.Connection, start: str | None = None, end: s
     return result
 
 
+# ── Multi-timeframe performance series ─────────────────────────────────────────
+# Virtual bankroll each profile's (and the live series') equity/drawdown curve is
+# anchored on — matches the paper-trading plan's $100k-per-profile convention so
+# figures read identically here and in the weekly paper report.
+_BANKROLL_BASE = 100000
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _period_bucket_key(granularity: str, trade_date: str) -> str:
+    """Bucket key for one trade_date: daily=itself, weekly=Monday of that ISO week
+    (YYYY-MM-DD), monthly=YYYY-MM. Computed in Python rather than SQL strftime so week
+    boundaries are unambiguous (SQLite's %W starts Sunday; _week_start() below is Monday)."""
+    if granularity == "monthly":
+        return trade_date[:7]
+    if granularity == "weekly":
+        d = datetime.strptime(trade_date, "%Y-%m-%d")
+        monday = d - timedelta(days=d.weekday())
+        return monday.strftime("%Y-%m-%d")
+    return trade_date
+
+
+def _pnl_series(conn: sqlite3.Connection, granularity: str, symbol: str | None = None,
+                 profile: str | None = None) -> list[dict]:
+    """Time-bucketed net P&L / win-rate / profit-factor series for the Performance view.
+
+    Reuses _stats_for_period's exact WHERE clause and net_pnl convention (sum of the `pnl`
+    column, not fee-subtracted — matches how the existing stats grid already computes
+    net_pnl) so a 'daily' series summed over a range always equals _stats_for_period's
+    net_pnl for that same range — the API's consistency guarantee, exercised in tests.
+
+    profile filters to one risk_profile (paper-trading DB only) behind a column-exists
+    check, so this is a no-op on the live DB until that column exists there too — the
+    "profile-ready" seam the paper-trading plan's risk_profile column plugs into.
+    """
+    where = ["status NOT IN ('cancelled', 'pending', 'partial_entry')"]
+    params: list = []
+    if symbol and symbol.upper() != "ALL":
+        where.append("symbol = ?")
+        params.append(symbol.upper())
+    if profile and _has_column(conn, "ic_trades", "risk_profile"):
+        where.append("risk_profile = ?")
+        params.append(profile)
+    rows = _rows(conn,
+        f"SELECT ic_order_id, trade_date, pnl, fees, net_credit, status FROM ic_trades "
+        f"WHERE {' AND '.join(where)} ORDER BY trade_date", params)
+    legs = _fetch_spread_legs(conn, [r["ic_order_id"] for r in rows])
+
+    buckets: dict[str, dict] = {}
+    for r in rows:
+        key = _period_bucket_key(granularity, r["trade_date"])
+        b = buckets.setdefault(key, {
+            "period": key, "net_pnl": 0.0, "gross_credit": 0.0, "fees": 0.0,
+            "trades": 0, "wins": 0, "losses": 0, "trade_pnls": [],
+        })
+        pnl = float(r.get("pnl") or 0)
+        b["net_pnl"] += pnl
+        b["gross_credit"] += float(r.get("net_credit") or 0)
+        b["fees"] += float(r.get("fees") or 0)
+        b["trades"] += 1
+        if r.get("pnl") is not None:
+            b["trade_pnls"].append(pnl)
+        trade_legs = legs.get(r["ic_order_id"], {})
+        w, l = _spread_wins_losses(r.get("status"), r.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
+        b["wins"] += w
+        b["losses"] += l
+
+    series = sorted(buckets.values(), key=lambda b: b["period"])
+    running = 0.0
+    peak = 0.0
+    for b in series:
+        pnls = b.pop("trade_pnls")
+        wins_dollar = [p for p in pnls if p > 0]
+        losses_dollar = [p for p in pnls if p <= 0]
+        gross_win = sum(wins_dollar)
+        gross_loss = abs(sum(losses_dollar))
+        b["net_pnl"] = round(b["net_pnl"], 2)
+        b["fees"] = round(b["fees"], 2)
+        b["profit_factor"] = round(gross_win / gross_loss, 3) if gross_loss > 0 else None
+        b["avg_win"] = round(gross_win / len(wins_dollar), 2) if wins_dollar else None
+        b["avg_loss"] = round(sum(losses_dollar) / len(losses_dollar), 2) if losses_dollar else None
+        b["expectancy_per_trade"] = round(sum(pnls) / len(pnls), 2) if pnls else None
+        running += b["net_pnl"]
+        peak = max(peak, running)
+        b["cumulative_pnl"] = round(running, 2)
+        b["equity"] = round(_BANKROLL_BASE + running, 2)
+        b["drawdown"] = round(peak - running, 2)
+        resolved = b["wins"] + b["losses"]
+        b["win_rate_pct"] = round(b["wins"] / resolved * 100, 1) if resolved else None
+
+    return series
+
+
+def _risk_metrics(daily_series: list[dict], bankroll: float = _BANKROLL_BASE) -> dict:
+    """Sharpe/Sortino/Calmar/recovery-factor for the current window, derived from the
+    daily net_pnl series (ratio metrics need daily granularity regardless of which
+    granularity the UI is displaying). Returns None fields (not zeros) when the sample is
+    too small to be meaningful (Sharpe/Sortino need >=2 return periods) — the caller
+    (client-side) renders these as an explicit '—', not a misleadingly precise 0.00.
+    """
+    if not daily_series:
+        return {"sharpe": None, "sortino": None, "calmar": None, "recovery_factor": None, "sample_size": 0}
+
+    returns = [b["net_pnl"] / bankroll for b in daily_series]
+    n = len(returns)
+    mean_r = sum(returns) / n
+
+    def _stdev(values: list[float]) -> float | None:
+        if len(values) < 2:
+            return None
+        m = sum(values) / len(values)
+        var = sum((v - m) ** 2 for v in values) / (len(values) - 1)
+        return var ** 0.5
+
+    sd = _stdev(returns)
+    sharpe = round(mean_r / sd * (252 ** 0.5), 3) if sd else None
+
+    downside = [r for r in returns if r < 0]
+    dd_sd = _stdev(downside) if len(downside) >= 2 else None
+    sortino = round(mean_r / dd_sd * (252 ** 0.5), 3) if dd_sd else None
+
+    total_return = sum(returns)
+    max_dd = max((b["drawdown"] for b in daily_series), default=0.0)
+    max_dd_pct = max_dd / bankroll if bankroll else 0.0
+    annualized_return = total_return * (252 / n) if n else 0.0
+    calmar = round(annualized_return / max_dd_pct, 3) if max_dd_pct > 0 else None
+
+    net_pnl_total = sum(b["net_pnl"] for b in daily_series)
+    recovery_factor = round(net_pnl_total / max_dd, 3) if max_dd > 0 else None
+
+    return {
+        "sharpe": sharpe, "sortino": sortino, "calmar": calmar,
+        "recovery_factor": recovery_factor, "sample_size": n,
+        # Overfit flags per docs/paper-trading.md's graduation-gate notes — Sharpe > 3 or
+        # profit_factor > 4.0 is a curve-fit warning, not a stronger pass.
+        "sharpe_overfit_flag": sharpe is not None and sharpe > 3,
+    }
+
+
 # ── Per-spread status ─────────────────────────────────────────────────────────
 
 def _badge(label: str, btype: str) -> dict:
@@ -291,11 +438,16 @@ def _build_log_data(n: int = 200) -> dict:
 
 # ── API data builder ──────────────────────────────────────────────────────────
 
-def _build_api_data(symbol: str | None = None) -> dict:
+def _build_api_data(symbol: str | None = None, profile: str | None = None) -> dict:
     """symbol filters trades/stats/analytics to one traded symbol; omit (or "ALL") for the
     account-wide view across every symbol — the economically meaningful default, since the
     account's actual risk caps (max_concurrent_ics, max_entries_per_day, buying power) are
-    checked against the combined total, not any one symbol in isolation."""
+    checked against the combined total, not any one symbol in isolation.
+
+    profile filters only the `performance` series (risk_profile, paper-trading DB) — trades/
+    stats/nlv_series/analytics stay unfiltered/blended across profiles, matching how `symbol`
+    already behaves for those. Scoped this way because profile comparison is specifically a
+    Performance-view concern, not a Today/History-view one."""
     if not os.path.exists(_DB_PATH):
         return {"ok": False, "error": "Database not found — run: python src/db.py init_db"}
 
@@ -453,6 +605,25 @@ def _build_api_data(symbol: str | None = None) -> dict:
             "spread_losses": l,
         })
 
+    profile_rows = _rows(conn,
+        "SELECT DISTINCT risk_profile FROM ic_trades WHERE risk_profile IS NOT NULL ORDER BY risk_profile")
+    # A DB with no profile-tagged trades (today's live DB, or a fresh paper DB) falls back to
+    # a single "live" entry — the profile selector then stays inert, exactly like before this
+    # feature existed. A paper DB with real trades naturally returns the four risk profiles as
+    # they accrue — no _MODE branching needed, this is purely data-driven.
+    profiles = [r["risk_profile"] for r in profile_rows] or ["live"]
+
+    daily_series = _pnl_series(conn, "daily", symbol=sym_filter, profile=profile)
+    performance = {
+        "daily":         daily_series,
+        "weekly":        _pnl_series(conn, "weekly", symbol=sym_filter, profile=profile),
+        "monthly":       _pnl_series(conn, "monthly", symbol=sym_filter, profile=profile),
+        "bankroll_base": _BANKROLL_BASE,
+        "risk_metrics":  _risk_metrics(daily_series),
+        "profiles":      profiles,
+        "selected_profile": profile or "ALL",
+    }
+
     conn.close()
 
     return {
@@ -465,6 +636,7 @@ def _build_api_data(symbol: str | None = None) -> dict:
         "trades":     trades,
         "last_loop":  last_loop,
         "nlv_series": nlv_series,
+        "performance": performance,
         "analytics": {
             "by_session":    by_session,
             "by_exit":       by_exit,
@@ -893,6 +1065,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .brand{padding:22px 18px 18px;border-bottom:1px solid #1e2430}
 .brand h1{font-size:15px;font-weight:700;letter-spacing:.3px;color:#fff}
 .brand p{font-size:10px;color:#6b7280;margin-top:3px;letter-spacing:1px;text-transform:uppercase}
+.mode-badge{display:inline-block;margin-top:9px;padding:4px 9px;font-size:10px;font-weight:700;
+  letter-spacing:.8px;text-transform:uppercase;color:#f5a623;background:#3d2a0d;
+  border:1px solid #f5a623;border-radius:4px}
 nav{flex:1;padding:10px 0}
 .nav-item{display:flex;align-items:center;gap:9px;padding:9px 18px;cursor:pointer;
            font-size:13px;color:#6b7280;transition:all .15s;
@@ -1055,6 +1230,7 @@ nav{flex:1;padding:10px 0}
   <div class="brand">
     <h1>MEICAgent</h1>
     <p>0DTE MEIC Strategy</p>
+    <!--MODE_BADGE-->
   </div>
   <nav>
     <div class="nav-item active" data-view="today">
@@ -1062,6 +1238,9 @@ nav{flex:1;padding:10px 0}
     </div>
     <div class="nav-item" data-view="history">
       <span class="nav-icon">&#9711;</span> History
+    </div>
+    <div class="nav-item" data-view="performance">
+      <span class="nav-icon">&#128200;</span> Performance
     </div>
     <div class="nav-item" data-view="gex">
       <span class="nav-icon">&#9699;</span> GEX
@@ -1224,6 +1403,101 @@ nav{flex:1;padding:10px 0}
               <th>Credit</th><th>Put</th><th>Put $</th>
               <th>Call</th><th>Call $</th>
               <th>P&amp;L</th><th>Session</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PERFORMANCE VIEW -->
+  <div class="view" id="view-performance">
+    <div class="frame" style="flex:0 0 auto">
+      <div class="frame-hdr" style="padding-bottom:4px">
+        <span class="frame-title">Performance</span>
+      </div>
+      <div style="padding:0 18px 12px;display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+        <div class="radio-group" id="perf-granularity-group">
+          <label><input type="radio" name="perf_granularity" value="daily" checked><span>Daily</span></label>
+          <label><input type="radio" name="perf_granularity" value="weekly"><span>Weekly</span></label>
+          <label><input type="radio" name="perf_granularity" value="monthly"><span>Monthly</span></label>
+          <label><input type="radio" name="perf_granularity" value="cumulative"><span>Cumulative</span></label>
+        </div>
+        <span style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.8px">Profile</span>
+        <select id="perf-profile-select" disabled style="background:#0d1117;color:#4a5568;border:1px solid #1e2430;
+                border-radius:4px;padding:4px 8px;font-size:12px;outline:none" title="Enabled once paper-trading risk_profile data exists">
+          <option value="live">Live</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="frame" style="flex:0 0 auto">
+      <div class="frame-hdr"><span class="frame-title">Risk-Adjusted Metrics</span>
+        <span class="frame-sub" id="perf-overfit-note"></span></div>
+      <div class="fee-grid" style="grid-template-columns:repeat(4,1fr);padding:14px 18px 18px">
+        <div class="fee-card"><div class="fee-lbl">Sharpe</div><div class="fee-val" id="rm-sharpe">&mdash;</div></div>
+        <div class="fee-card"><div class="fee-lbl">Sortino</div><div class="fee-val" id="rm-sortino">&mdash;</div></div>
+        <div class="fee-card"><div class="fee-lbl">Calmar</div><div class="fee-val" id="rm-calmar">&mdash;</div></div>
+        <div class="fee-card"><div class="fee-lbl">Recovery Factor</div><div class="fee-val" id="rm-recovery">&mdash;</div></div>
+      </div>
+    </div>
+
+    <div class="frame" style="flex:0 0 210px">
+      <div class="frame-hdr" style="padding-bottom:4px"><span class="frame-title">Cumulative Equity ($100k base)</span></div>
+      <div class="chart-wrap">
+        <canvas id="perf-equity-canvas"></canvas>
+        <div class="empty" id="perf-equity-empty" style="display:none;padding:18px 0">Insufficient history yet.</div>
+      </div>
+    </div>
+    <div class="frame" style="flex:0 0 150px">
+      <div class="frame-hdr" style="padding-bottom:4px"><span class="frame-title">Drawdown (Underwater)</span></div>
+      <div class="chart-wrap">
+        <canvas id="perf-drawdown-canvas"></canvas>
+        <div class="empty" id="perf-drawdown-empty" style="display:none;padding:18px 0">Insufficient history yet.</div>
+      </div>
+    </div>
+
+    <div class="frame" style="flex:1;min-height:0;overflow:hidden">
+      <div class="ana-grid">
+        <div class="apanel">
+          <div class="ptitle">Per-Period Net P&amp;L</div>
+          <div class="chart-wrap" style="padding:6px 0"><canvas id="perf-pnlbar-canvas"></canvas>
+            <div class="empty" id="perf-pnlbar-empty" style="display:none">Insufficient history yet.</div></div>
+        </div>
+        <div class="apanel">
+          <div class="ptitle">Win Rate Trend</div>
+          <div class="chart-wrap" style="padding:6px 0"><canvas id="perf-winrate-canvas"></canvas>
+            <div class="empty" id="perf-winrate-empty" style="display:none">Insufficient history yet.</div></div>
+        </div>
+        <div class="apanel">
+          <div class="ptitle">Profit Factor Trend</div>
+          <div class="chart-wrap" style="padding:6px 0"><canvas id="perf-pf-canvas"></canvas>
+            <div class="empty" id="perf-pf-empty" style="display:none">Insufficient history yet.</div></div>
+        </div>
+        <div class="apanel">
+          <div class="ptitle">Expectancy per Trade</div>
+          <div class="chart-wrap" style="padding:6px 0"><canvas id="perf-expectancy-canvas"></canvas>
+            <div class="empty" id="perf-expectancy-empty" style="display:none">Insufficient history yet.</div></div>
+        </div>
+        <div class="apanel">
+          <div class="ptitle">Trade Count</div>
+          <div class="chart-wrap" style="padding:6px 0"><canvas id="perf-count-canvas"></canvas>
+            <div class="empty" id="perf-count-empty" style="display:none">Insufficient history yet.</div></div>
+        </div>
+        <div class="apanel">
+          <div class="ptitle">Avg Win vs Avg Loss</div>
+          <div class="chart-wrap" style="padding:6px 0"><canvas id="perf-winloss-canvas"></canvas>
+            <div class="empty" id="perf-winloss-empty" style="display:none">Insufficient history yet.</div></div>
+        </div>
+      </div>
+      <div class="apanel" style="margin-top:10px">
+        <div class="ptitle">Per-Period Values</div>
+        <div style="overflow-x:auto">
+          <table class="atable" id="perf-values-tbl" style="width:100%;min-width:640px">
+            <thead><tr>
+              <th>Period</th><th>Trades</th><th>Net P&amp;L</th><th>Cumulative</th>
+              <th>Win %</th><th>Profit Factor</th><th>Avg Win</th><th>Avg Loss</th>
             </tr></thead>
             <tbody></tbody>
           </table>
@@ -1410,6 +1684,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.add('active');
     document.getElementById('view-' + el.dataset.view).classList.add('active');
     if (el.dataset.view === 'history' && cache) renderHistory(cache);
+    if (el.dataset.view === 'performance' && cache) renderPerformance(cache);
     if (el.dataset.view === 'gex') { _initGexSymbol(); fetchGex(); }
     if (el.dataset.view === 'logs') fetchLog();
   });
@@ -1652,6 +1927,285 @@ function populateSymbolSelectors(symbols) {
   });
 }
 
+// ── profile selector (paper-trading dashboard) ──────────────────────────────────
+// Unlike symbols (fixed from config.json, populated once), profiles can appear one at a
+// time as each accrues its first trade — so this re-populates whenever the server's
+// profile list actually changes, rather than a single-shot guard, while preserving the
+// current selection if it's still valid.
+let lastProfilesKey = '';
+function populateProfileSelector(profiles) {
+  if (!profiles || !profiles.length) return;
+  const key = profiles.join(',');
+  if (key === lastProfilesKey) return;
+  lastProfilesKey = key;
+  const sel = document.getElementById('perf-profile-select');
+  const current = sel.value;
+  sel.innerHTML = '';
+  profiles.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p;
+    o.textContent = p === 'live' ? 'Live' : p.charAt(0).toUpperCase() + p.slice(1);
+    sel.appendChild(o);
+  });
+  if (profiles.includes(current)) sel.value = current;
+  // Only real multi-profile data (paper trades tagged with a risk_profile) makes the
+  // selector meaningful — a live dashboard or an empty paper DB stays on the inert
+  // single "Live" placeholder, disabled, exactly as before this feature existed.
+  sel.disabled = profiles.length <= 1;
+  sel.title = sel.disabled ? 'Enabled once paper-trading risk_profile data exists' : '';
+}
+
+// ── performance view ─────────────────────────────────────────────────────────
+let perfEquityChart=null, perfDrawdownChart=null, perfPnlChart=null, perfWinRateChart=null,
+    perfPfChart=null, perfExpectancyChart=null, perfCountChart=null, perfWinLossChart=null;
+
+function _perfGuard(series, canvasId, emptyId, minLen) {
+  const canvas = document.getElementById(canvasId);
+  const empty = document.getElementById(emptyId);
+  const ok = series && series.length >= (minLen || 2);
+  if (canvas) canvas.style.display = ok ? 'block' : 'none';
+  if (empty) empty.style.display = ok ? 'none' : 'block';
+  return ok;
+}
+
+function _perfSeries(d) {
+  const g = document.querySelector('input[name="perf_granularity"]:checked')?.value || 'daily';
+  const perf = d.performance || {};
+  // "Cumulative" reuses the daily series (finest granularity) — its own charts read
+  // cumulative_pnl/equity/drawdown rather than switching the underlying bucketing.
+  return g === 'cumulative' ? (perf.daily || []) : (perf[g] || []);
+}
+
+function renderPerformance(d) {
+  const perf = d.performance || {};
+  const g = document.querySelector('input[name="perf_granularity"]:checked')?.value || 'daily';
+  const series = _perfSeries(d);
+  const isCumulative = g === 'cumulative';
+
+  renderRiskMetrics(perf.risk_metrics || {});
+  renderPerfEquity(series);
+  renderPerfDrawdown(series);
+  // Per-period bar/trend charts are granularity-specific and not meaningful in the
+  // cumulative view (which is about the running curve, not discrete periods) — hide
+  // them there rather than showing per-day bars mislabeled as "cumulative."
+  ['perf-pnlbar', 'perf-winrate', 'perf-pf', 'perf-expectancy', 'perf-count', 'perf-winloss'].forEach(id => {
+    const frame = document.getElementById(id + '-canvas')?.closest('.apanel');
+    if (frame) frame.style.display = isCumulative ? 'none' : '';
+  });
+  if (!isCumulative) {
+    renderPerfPnlBar(series);
+    renderPerfWinRate(series);
+    renderPerfProfitFactor(series);
+    renderPerfExpectancy(series);
+    renderPerfCount(series);
+    renderPerfWinLoss(series);
+  }
+  renderPerfTable(series);
+}
+
+function renderRiskMetrics(rm) {
+  const fmt = v => v == null ? '—' : v.toFixed(2);
+  document.getElementById('rm-sharpe').textContent = fmt(rm.sharpe);
+  document.getElementById('rm-sortino').textContent = fmt(rm.sortino);
+  document.getElementById('rm-calmar').textContent = fmt(rm.calmar);
+  document.getElementById('rm-recovery').textContent = fmt(rm.recovery_factor);
+  document.getElementById('rm-sharpe').className = 'fee-val' + (rm.sharpe != null && rm.sharpe < 0 ? ' neg' : '');
+  const note = document.getElementById('perf-overfit-note');
+  if (rm.sharpe_overfit_flag) {
+    note.textContent = 'Sharpe > 3 — likely overfit on a thin sample, not a stronger result';
+  } else if (rm.sample_size != null && rm.sample_size < 30) {
+    note.textContent = 'Sample size ' + rm.sample_size + ' day(s) — below the significance floor used for graduation';
+  } else {
+    note.textContent = '';
+  }
+}
+
+function renderPerfEquity(series) {
+  if (!_perfGuard(series, 'perf-equity-canvas', 'perf-equity-empty')) return;
+  const labels = series.map(b => b.period);
+  const vals = series.map(b => b.equity);
+  const color = vals[vals.length - 1] >= vals[0] ? '#00c896' : '#e8423a';
+  if (perfEquityChart) {
+    perfEquityChart.data.labels = labels;
+    perfEquityChart.data.datasets[0].data = vals;
+    perfEquityChart.data.datasets[0].borderColor = color;
+    perfEquityChart.data.datasets[0].backgroundColor = color + '22';
+    perfEquityChart.update(); return;
+  }
+  const opts = _baseOpts();
+  opts.plugins.tooltip.callbacks = { label: ctx => '$' + ctx.parsed.y.toLocaleString() };
+  opts.scales.y.ticks.callback = v => '$' + v.toLocaleString();
+  perfEquityChart = new Chart(document.getElementById('perf-equity-canvas'), {
+    type: 'line',
+    data: { labels, datasets: [{ data: vals, borderColor: color, backgroundColor: color + '22',
+      borderWidth: 2, pointRadius: series.length > 60 ? 0 : 3, pointHoverRadius: 5, fill: true, tension: 0.25 }] },
+    options: opts,
+  });
+}
+
+function renderPerfDrawdown(series) {
+  if (!_perfGuard(series, 'perf-drawdown-canvas', 'perf-drawdown-empty')) return;
+  const labels = series.map(b => b.period);
+  const vals = series.map(b => -b.drawdown); // negative so the fill visually sits "underwater"
+  if (perfDrawdownChart) {
+    perfDrawdownChart.data.labels = labels;
+    perfDrawdownChart.data.datasets[0].data = vals;
+    perfDrawdownChart.update(); return;
+  }
+  const opts = _baseOpts();
+  opts.plugins.tooltip.callbacks = { label: ctx => '-$' + Math.abs(ctx.parsed.y).toLocaleString() };
+  opts.scales.y.ticks.callback = v => '$' + v.toLocaleString();
+  perfDrawdownChart = new Chart(document.getElementById('perf-drawdown-canvas'), {
+    type: 'line',
+    data: { labels, datasets: [{ data: vals, borderColor: '#e8423a', backgroundColor: '#e8423a1a',
+      borderWidth: 2, pointRadius: 0, fill: true, tension: 0 }] },
+    options: opts,
+  });
+}
+
+function renderPerfPnlBar(series) {
+  if (!_perfGuard(series, 'perf-pnlbar-canvas', 'perf-pnlbar-empty')) return;
+  const labels = series.map(b => b.period);
+  const vals = series.map(b => b.net_pnl);
+  const colors = vals.map(v => v >= 0 ? '#00c896' : '#e8423a');
+  if (perfPnlChart) {
+    perfPnlChart.data.labels = labels;
+    perfPnlChart.data.datasets[0].data = vals;
+    perfPnlChart.data.datasets[0].backgroundColor = colors;
+    perfPnlChart.update(); return;
+  }
+  const opts = _baseOpts();
+  opts.plugins.tooltip.callbacks = { label: ctx => '$' + ctx.parsed.y.toFixed(2) };
+  opts.scales.y.ticks.callback = v => '$' + v.toLocaleString();
+  perfPnlChart = new Chart(document.getElementById('perf-pnlbar-canvas'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: vals, backgroundColor: colors, borderRadius: 4, maxBarThickness: 24 }] },
+    options: opts,
+  });
+}
+
+function renderPerfWinRate(series) {
+  if (!_perfGuard(series, 'perf-winrate-canvas', 'perf-winrate-empty')) return;
+  const labels = series.map(b => b.period);
+  const vals = series.map(b => b.win_rate_pct);
+  if (perfWinRateChart) {
+    perfWinRateChart.data.labels = labels;
+    perfWinRateChart.data.datasets[0].data = vals;
+    perfWinRateChart.update(); return;
+  }
+  const opts = _baseOpts();
+  opts.plugins.tooltip.callbacks = { label: ctx => ctx.parsed.y == null ? '—' : ctx.parsed.y.toFixed(1) + '%' };
+  opts.scales.y.min = 0; opts.scales.y.max = 100;
+  opts.scales.y.ticks.callback = v => v + '%';
+  perfWinRateChart = new Chart(document.getElementById('perf-winrate-canvas'), {
+    type: 'line',
+    data: { labels, datasets: [{ data: vals, borderColor: '#00c896', backgroundColor: '#00c89622',
+      borderWidth: 2, pointRadius: 3, spanGaps: true, tension: 0.25 }] },
+    options: opts,
+  });
+}
+
+function renderPerfProfitFactor(series) {
+  if (!_perfGuard(series, 'perf-pf-canvas', 'perf-pf-empty')) return;
+  const labels = series.map(b => b.period);
+  const vals = series.map(b => b.profit_factor);
+  if (perfPfChart) {
+    perfPfChart.data.labels = labels;
+    perfPfChart.data.datasets[0].data = vals;
+    perfPfChart.update(); return;
+  }
+  const opts = _baseOpts();
+  opts.plugins.tooltip.callbacks = { label: ctx => ctx.parsed.y == null ? '—' : ctx.parsed.y.toFixed(2) };
+  perfPfChart = new Chart(document.getElementById('perf-pf-canvas'), {
+    type: 'line',
+    data: { labels, datasets: [{ data: vals, borderColor: '#00c896', backgroundColor: '#00c89622',
+      borderWidth: 2, pointRadius: 3, spanGaps: true, tension: 0.25 }] },
+    options: opts,
+  });
+}
+
+function renderPerfExpectancy(series) {
+  if (!_perfGuard(series, 'perf-expectancy-canvas', 'perf-expectancy-empty')) return;
+  const labels = series.map(b => b.period);
+  const vals = series.map(b => b.expectancy_per_trade);
+  const colors = vals.map(v => v == null ? '#4a5568' : v >= 0 ? '#00c896' : '#e8423a');
+  if (perfExpectancyChart) {
+    perfExpectancyChart.data.labels = labels;
+    perfExpectancyChart.data.datasets[0].data = vals;
+    perfExpectancyChart.data.datasets[0].backgroundColor = colors;
+    perfExpectancyChart.update(); return;
+  }
+  const opts = _baseOpts();
+  opts.plugins.tooltip.callbacks = { label: ctx => ctx.parsed.y == null ? '—' : '$' + ctx.parsed.y.toFixed(2) };
+  perfExpectancyChart = new Chart(document.getElementById('perf-expectancy-canvas'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: vals, backgroundColor: colors, borderRadius: 4, maxBarThickness: 24 }] },
+    options: opts,
+  });
+}
+
+function renderPerfCount(series) {
+  if (!_perfGuard(series, 'perf-count-canvas', 'perf-count-empty')) return;
+  const labels = series.map(b => b.period);
+  const vals = series.map(b => b.trades);
+  if (perfCountChart) {
+    perfCountChart.data.labels = labels;
+    perfCountChart.data.datasets[0].data = vals;
+    perfCountChart.update(); return;
+  }
+  const opts = _baseOpts();
+  perfCountChart = new Chart(document.getElementById('perf-count-canvas'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: vals, backgroundColor: '#4a5568', borderRadius: 4, maxBarThickness: 24 }] },
+    options: opts,
+  });
+}
+
+function renderPerfWinLoss(series) {
+  if (!_perfGuard(series, 'perf-winloss-canvas', 'perf-winloss-empty')) return;
+  const labels = series.map(b => b.period);
+  const wins = series.map(b => b.avg_win);
+  const losses = series.map(b => b.avg_loss);
+  if (perfWinLossChart) {
+    perfWinLossChart.data.labels = labels;
+    perfWinLossChart.data.datasets[0].data = wins;
+    perfWinLossChart.data.datasets[1].data = losses;
+    perfWinLossChart.update(); return;
+  }
+  const opts = _baseOpts();
+  // Two series (avg win / avg loss) — a legend is required per the dashboard's
+  // dataviz-skill guidance for >=2 series; a single-series chart elsewhere skips it.
+  opts.plugins.legend = { display: true, labels: { color: '#8b949e', boxWidth: 10, font: { size: 10 } } };
+  opts.plugins.tooltip.callbacks = { label: ctx => ctx.dataset.label + ': ' + (ctx.parsed.y == null ? '—' : '$' + ctx.parsed.y.toFixed(2)) };
+  perfWinLossChart = new Chart(document.getElementById('perf-winloss-canvas'), {
+    type: 'bar',
+    data: { labels, datasets: [
+      { label: 'Avg Win', data: wins, backgroundColor: '#00c896', borderRadius: 4, maxBarThickness: 18 },
+      { label: 'Avg Loss', data: losses, backgroundColor: '#e8423a', borderRadius: 4, maxBarThickness: 18 },
+    ] },
+    options: opts,
+  });
+}
+
+function renderPerfTable(series) {
+  const tbody = document.querySelector('#perf-values-tbl tbody');
+  if (!series || !series.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = series.slice().reverse().map(b => {
+    return '<tr><td>' + b.period + '</td><td>' + b.trades + '</td>' +
+      '<td>' + fPnl(b.net_pnl) + '</td><td>' + fPnl(b.cumulative_pnl) + '</td>' +
+      '<td>' + (b.win_rate_pct == null ? '—' : b.win_rate_pct.toFixed(1) + '%') + '</td>' +
+      '<td>' + (b.profit_factor == null ? '—' : b.profit_factor.toFixed(2)) + '</td>' +
+      '<td>' + (b.avg_win == null ? '—' : '$' + b.avg_win.toFixed(2)) + '</td>' +
+      '<td>' + (b.avg_loss == null ? '—' : '$' + b.avg_loss.toFixed(2)) + '</td></tr>';
+  }).join('');
+}
+
+document.querySelectorAll('input[name="perf_granularity"]').forEach(el =>
+  el.addEventListener('change', () => { if (cache) renderPerformance(cache); }));
+
 // ── render all ────────────────────────────────────────────────────────────────
 function renderAll(d) {
   cache = d;
@@ -1659,17 +2213,20 @@ function renderAll(d) {
   document.getElementById('as-of').textContent = d.as_of
     ? d.as_of.substring(0, 19).replace('T', ' ') + ' ET' : '';
   populateSymbolSelectors(d.symbols);
+  populateProfileSelector((d.performance && d.performance.profiles) || []);
   renderStats(d.stats || {});
   renderTrades(d.trades || []);
   renderStatus(d);
   if (document.getElementById('view-history').classList.contains('active')) renderHistory(d);
+  if (document.getElementById('view-performance').classList.contains('active')) renderPerformance(d);
 }
 
 // ── fetch ─────────────────────────────────────────────────────────────────────
 async function fetchData() {
   try {
     const sym = document.getElementById('main-symbol-select').value || 'ALL';
-    const r = await fetch('/api/data?symbol=' + encodeURIComponent(sym));
+    const prof = document.getElementById('perf-profile-select').value || 'ALL';
+    const r = await fetch('/api/data?symbol=' + encodeURIComponent(sym) + '&profile=' + encodeURIComponent(prof));
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     if (d.ok === false) {
@@ -1686,6 +2243,7 @@ async function fetchData() {
 }
 
 document.getElementById('main-symbol-select').addEventListener('change', fetchData);
+document.getElementById('perf-profile-select').addEventListener('change', fetchData);
 
 // ── log tail ──────────────────────────────────────────────────────────────────
 let logPaused = false;
@@ -2260,7 +2818,13 @@ setInterval(fetchGex, 15000);
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            body = HTML.encode("utf-8")
+            page = HTML
+            if _MODE == "paper":
+                page = page.replace("<!--MODE_BADGE-->", '<span class="mode-badge">Paper Mode — Simulated</span>')
+                page = page.replace("<title>MEICAgent</title>", "<title>MEICAgent — Paper</title>")
+            else:
+                page = page.replace("<!--MODE_BADGE-->", "")
+            body = page.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -2269,8 +2833,11 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/data"):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             sym = (qs.get("symbol") or [None])[0]
+            prof = (qs.get("profile") or [None])[0]
+            if prof and prof.upper() == "ALL":
+                prof = None
             try:
-                result = _build_api_data(sym)
+                result = _build_api_data(sym, prof)
             except Exception as exc:
                 result = {"ok": False, "error": str(exc)}
             body = json.dumps(result, default=str).encode("utf-8")
@@ -2320,11 +2887,42 @@ class _ThreadingServer(ThreadingMixIn, HTTPServer):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _resolve_mode_defaults(mode: str, db_arg: str | None, port_arg: int | None,
+                            default_db_path: str = _DB_PATH) -> tuple[str, int]:
+    """Pure resolution of (db_path, port) from --mode/--db/--port. Extracted out of main()
+    so the default-resolution logic (the only part of --mode/--db/--port with real branching)
+    is unit-testable without spinning up a real HTTP server or parsing sys.argv.
+
+    `default_db_path` is a parameter (not a direct read of the module-level _DB_PATH) so
+    tests can pin it explicitly rather than depending on import-time global state.
+    """
+    if db_arg:
+        db_path = db_arg
+    elif mode == "paper":
+        db_path = _PAPER_DB_PATH
+    else:
+        db_path = default_db_path
+    port = port_arg or (5051 if mode == "paper" else 5050)
+    return db_path, port
+
+
 def main():
+    global _DB_PATH, _MODE
     parser = argparse.ArgumentParser(description="MEICAgent Dashboard")
-    parser.add_argument("--port", type=int, default=5050)
+    parser.add_argument("--mode", choices=["live", "paper"], default="live",
+                         help="'paper' points the dashboard at data/paper_trades.db and "
+                              "defaults the port to 5051, so it can run alongside the live "
+                              "dashboard (port 5050) without conflict.")
+    parser.add_argument("--port", type=int, default=None,
+                         help="Overrides the mode-based default (5050 live / 5051 paper).")
+    parser.add_argument("--db", default=None,
+                         help="Overrides the mode-based default DB path.")
     args = parser.parse_args()
-    port = args.port
+
+    _MODE = args.mode
+    _DB_PATH, port = _resolve_mode_defaults(args.mode, args.db, args.port)
+    # `python dashboard.py` with no args resolves to (today's default meic_trades.db path, 5050)
+    # — byte-identical to pre-paper-mode behavior.
 
     # Check if already running
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

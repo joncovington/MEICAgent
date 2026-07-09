@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     exit_time TEXT, exit_price REAL, exit_reason TEXT, exit_analysis TEXT,
     put_stop_cost REAL, call_stop_cost REAL,
     pnl REAL, fees REAL, fill_confirmed_at TEXT,
+    risk_profile TEXT, execution_mode TEXT, iv_rank_source TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS ic_spread_legs (
@@ -484,3 +485,71 @@ def test_build_api_data_symbol_filter_applies_to_fee_summary(db_path):
     spx_result = dashboard._build_api_data("SPX")
     assert xsp_result["analytics"]["fee_summary"]["gross_credit"] == 0.50
     assert spx_result["analytics"]["fee_summary"]["gross_credit"] == 1.50
+
+
+# ── --mode/--db/--port default resolution (paper-trading dashboard) ────────────
+
+def test_resolve_mode_defaults_live_no_overrides():
+    db, port = dashboard._resolve_mode_defaults("live", None, None, default_db_path="/x/meic_trades.db")
+    assert db == "/x/meic_trades.db"
+    assert port == 5050
+
+
+def test_resolve_mode_defaults_paper_no_overrides():
+    db, port = dashboard._resolve_mode_defaults("paper", None, None, default_db_path="/x/meic_trades.db")
+    assert db == dashboard._PAPER_DB_PATH
+    assert port == 5051
+
+
+def test_resolve_mode_defaults_explicit_db_overrides_mode():
+    db, port = dashboard._resolve_mode_defaults("paper", "/custom/path.db", None, default_db_path="/x/meic_trades.db")
+    assert db == "/custom/path.db"
+    assert port == 5051  # --db overrides the DB path only; port default still follows mode
+
+
+def test_resolve_mode_defaults_explicit_port_overrides_mode_default():
+    db, port = dashboard._resolve_mode_defaults("live", None, 9999, default_db_path="/x/meic_trades.db")
+    assert db == "/x/meic_trades.db"
+    assert port == 9999
+
+
+# ── Profile derivation and filtering (paper-trading dashboard) ─────────────────
+
+def test_build_api_data_profiles_empty_falls_back_to_live(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-1", status="expired", pnl=1.0)  # no risk_profile set
+    conn.close()
+    result = dashboard._build_api_data()
+    assert result["performance"]["profiles"] == ["live"]
+
+
+def test_build_api_data_profiles_derived_from_distinct_values(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-1", status="expired", pnl=1.0, risk_profile="moderate")
+    _insert_trade(conn, ic_order_id="IC-2", status="expired", pnl=2.0, risk_profile="conservative")
+    _insert_trade(conn, ic_order_id="IC-3", status="expired", pnl=3.0, risk_profile="conservative")
+    conn.close()
+    result = dashboard._build_api_data()
+    assert result["performance"]["profiles"] == ["conservative", "moderate"]
+
+
+def test_build_api_data_profile_filter_scopes_performance_series_only(db_path):
+    conn = dashboard._connect()
+    _insert_trade(conn, ic_order_id="IC-1", status="expired", pnl=100.0, fees=1.0, risk_profile="conservative")
+    _insert_trade(conn, ic_order_id="IC-2", status="expired", pnl=50.0, fees=1.0, risk_profile="moderate")
+    conn.close()
+
+    filtered = dashboard._build_api_data(None, "conservative")
+    unfiltered = dashboard._build_api_data(None, None)
+
+    # performance.daily is scoped to the requested profile. net_pnl sums the `pnl` column
+    # directly (not fee-subtracted) to match _pnl_series/_stats_for_period's shared
+    # convention — see the consistency guard between them.
+    assert sum(b["net_pnl"] for b in filtered["performance"]["daily"]) == pytest.approx(100.0)
+    # ...but trades/stats stay blended across profiles regardless of the profile filter,
+    # matching how `symbol` already behaves for those (profile comparison is a
+    # Performance-view-specific concern, not a Today/History-view one).
+    assert len(filtered["trades"]) == 2
+    assert len(unfiltered["trades"]) == 2
+    assert filtered["performance"]["selected_profile"] == "conservative"
+    assert unfiltered["performance"]["selected_profile"] == "ALL"

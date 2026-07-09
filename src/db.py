@@ -20,7 +20,10 @@ except ImportError:
     def _today_et():
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "meic_trades.db")
+_DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "meic_trades.db")
+# MEIC_DB_PATH lets the paper-trading engine (src/paper.py) and its skills point every
+# db.py subcommand at data/paper_trades.db instead, without duplicating this module.
+_DB_PATH = os.environ.get("MEIC_DB_PATH") or _DEFAULT_DB_PATH
 
 
 def _connect():
@@ -91,6 +94,9 @@ CREATE TABLE IF NOT EXISTS ic_trades (
     fees                      REAL,
     dollar_multiplier         REAL DEFAULT 100,
     fill_confirmed_at         TEXT,
+    risk_profile              TEXT,
+    execution_mode            TEXT,
+    iv_rank_source            TEXT,
     created_at                TEXT NOT NULL,
     updated_at                TEXT NOT NULL
 );
@@ -172,9 +178,16 @@ def cmd_init_db(_args):
         ("put_spread_entry_order_id",  "TEXT"),
         ("call_spread_entry_order_id", "TEXT"),
         ("dollar_multiplier",       "REAL DEFAULT 100"),
+        ("risk_profile",           "TEXT"),
+        ("execution_mode",         "TEXT"),
+        ("iv_rank_source",         "TEXT"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE ic_trades ADD COLUMN {col} {col_type}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ic_trades_profile_date "
+        "ON ic_trades(risk_profile, trade_date, status)"
+    )
     # Drop columns removed from the schema
     if "trend_signal" in existing:
         conn.execute("ALTER TABLE ic_trades DROP COLUMN trend_signal")
@@ -196,7 +209,10 @@ def cmd_init_db(_args):
 # ---------------------------------------------------------------------------
 
 def cmd_get_open_trades(args):
-    today = _today_et()
+    # --date lets callers iterating a non-"real-today" trade_date (chiefly the paper-trading
+    # replay engine, which walks historical trading days) query that day's open positions
+    # instead of always the live system clock's date.
+    today = getattr(args, "date", None) or _today_et()
     symbol = getattr(args, "symbol", None)
     conn = _connect()
     sql = "SELECT * FROM ic_trades WHERE status IN ('pending','open','partial','partial_entry') AND trade_date = ?"
@@ -290,6 +306,133 @@ def cmd_get_eod_summary(_args):
         "trades": trades,
         "loop_log": [dict(r) for r in loop_rows],
     })
+
+
+def _range_stats_for_rows(rows: list[dict]) -> dict:
+    """Compute financial stats for one already-filtered group of ic_trades rows.
+
+    net pnl per trade = pnl - fees (matches get_eod_summary's net_pnl = gross_pnl - fees
+    convention, applied per-trade so profit factor / avg win-loss are dollar-accurate).
+    """
+    total_trades = len(rows)
+    gross_credit = sum((r["net_credit"] or 0) for r in rows)
+    gross_pnl = sum((r["pnl"] or 0) for r in rows)
+    fees = sum((r["fees"] or 0) for r in rows)
+
+    resolved = [r for r in rows if r["pnl"] is not None]
+    net_pnls = [(r["pnl"] or 0) - (r["fees"] or 0) for r in resolved]
+    wins = [p for p in net_pnls if p > 0]
+    losses = [p for p in net_pnls if p <= 0]
+    win_count = len(wins)
+    loss_count = len(losses)
+    resolved_count = win_count + loss_count
+
+    gross_win_total = sum(wins)
+    gross_loss_total = abs(sum(losses))
+    profit_factor = round(gross_win_total / gross_loss_total, 3) if gross_loss_total > 0 else None
+    avg_win = round(gross_win_total / win_count, 2) if win_count else None
+    avg_loss = round(sum(losses) / loss_count, 2) if loss_count else None
+    win_rate_pct = round(win_count / resolved_count * 100, 1) if resolved_count else None
+    net_pnl_total = sum(net_pnls)
+    expectancy = round(net_pnl_total / resolved_count, 2) if resolved_count else None
+
+    max_consecutive_losses = 0
+    streak = 0
+    for r in rows:
+        if r["pnl"] is None:
+            continue
+        net = (r["pnl"] or 0) - (r["fees"] or 0)
+        if net <= 0:
+            streak += 1
+            max_consecutive_losses = max(max_consecutive_losses, streak)
+        else:
+            streak = 0
+
+    # Per-day net-pnl series with a running cumulative sum, for equity-curve /
+    # drawdown / worst-day computation by the caller (report or dashboard).
+    by_date: dict[str, float] = {}
+    for r in rows:
+        if r["pnl"] is None:
+            continue
+        by_date.setdefault(r["trade_date"], 0.0)
+        by_date[r["trade_date"]] += (r["pnl"] or 0) - (r["fees"] or 0)
+    daily_pnl = []
+    running = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    worst_day = None
+    for date in sorted(by_date):
+        day_pnl = round(by_date[date], 2)
+        running += day_pnl
+        peak = max(peak, running)
+        max_drawdown = max(max_drawdown, peak - running)
+        worst_day = day_pnl if worst_day is None else min(worst_day, day_pnl)
+        daily_pnl.append({"date": date, "net_pnl": day_pnl, "cumulative_pnl": round(running, 2)})
+
+    return {
+        "total_trades": total_trades,
+        "gross_credit": round(gross_credit, 2),
+        "gross_pnl": round(gross_pnl, 2),
+        "fees": round(fees, 2),
+        "net_pnl": round(net_pnl_total, 2),
+        "win_count": win_count,
+        "loss_count": loss_count,
+        "win_rate_pct": win_rate_pct,
+        "profit_factor": profit_factor,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "expectancy_per_trade": expectancy,
+        "max_consecutive_losses": max_consecutive_losses,
+        "max_drawdown": round(max_drawdown, 2),
+        "worst_day": worst_day,
+        "daily_pnl": daily_pnl,
+    }
+
+
+def cmd_get_range_summary(args):
+    """Multi-day / multi-week P&L, win-rate, and drawdown rollup — the aggregation that
+    get_eod_summary/get_today_pnl don't provide (both are hardcoded to today). Used by the
+    paper-trading weekly report and, optionally, live multi-day review. Groups results by
+    risk_profile so the four parallel-shadow profiles (or "unassigned" for rows with no
+    profile set, e.g. live trades) can be compared side by side from one call.
+    """
+    if not args.start or not args.end:
+        _out({"ok": False, "error": "Both --start and --end are required (YYYY-MM-DD)"})
+        return
+    conn = _connect()
+    where = ["trade_date >= ?", "trade_date <= ?", "status NOT IN ('cancelled','pending','partial_entry')"]
+    params: list = [args.start, args.end]
+    if args.symbol:
+        where.append("symbol = ?")
+        params.append(args.symbol.upper())
+    if args.profile:
+        where.append("risk_profile = ?")
+        params.append(args.profile)
+    rows = _rows_dicts(conn, where, params)
+    conn.close()
+
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        key = r["risk_profile"] or "unassigned"
+        groups.setdefault(key, []).append(r)
+
+    profiles = {key: _range_stats_for_rows(group_rows) for key, group_rows in groups.items()}
+
+    _out({
+        "ok": True,
+        "start": args.start,
+        "end": args.end,
+        "symbol": args.symbol.upper() if args.symbol else None,
+        "profiles": profiles,
+    })
+
+
+def _rows_dicts(conn: sqlite3.Connection, where: list[str], params: list) -> list[dict]:
+    sql = (
+        "SELECT trade_date, risk_profile, symbol, pnl, fees, net_credit, status "
+        f"FROM ic_trades WHERE {' AND '.join(where)} ORDER BY trade_date, id"
+    )
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 def cmd_get_fee_estimate(args):
@@ -612,12 +755,20 @@ def cmd_save_daily_summary(args):
 # ---------------------------------------------------------------------------
 
 def main():
+    global _DB_PATH
     parser = argparse.ArgumentParser(description="MEICAgent DB helper")
+    parser.add_argument("--db", default=None,
+                         help="Override the database path (defaults to MEIC_DB_PATH env var, "
+                              "then data/meic_trades.db). Used by the paper-trading engine to "
+                              "point at data/paper_trades.db.")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("init_db")
     p_open = sub.add_parser("get_open_trades")
     p_open.add_argument("--symbol", default=None, help="Filter to one symbol; omit for all symbols")
+    p_open.add_argument("--date", default=None,
+                         help="Override trade_date to query (YYYY-MM-DD); defaults to the real "
+                              "system today. Used by paper-trading replay to query a historical day.")
     p_cnt = sub.add_parser("get_today_count")
     p_cnt.add_argument("--symbol", default=None, help="Filter to one symbol; omit for all symbols")
     p_pnl = sub.add_parser("get_today_pnl")
@@ -625,6 +776,13 @@ def main():
     sub.add_parser("get_eod_summary")
     sub.add_parser("get_session_init")
     sub.add_parser("set_session_init")
+
+    p_range = sub.add_parser("get_range_summary")
+    p_range.add_argument("--start", required=True, help="Inclusive start date, YYYY-MM-DD")
+    p_range.add_argument("--end", required=True, help="Inclusive end date, YYYY-MM-DD")
+    p_range.add_argument("--profile", default=None,
+                          help="Filter to one risk_profile; omit to group by every profile present")
+    p_range.add_argument("--symbol", default=None, help="Filter to one symbol; omit for all symbols")
 
     p_fee = sub.add_parser("get_fee_estimate")
     p_fee.add_argument("--symbol", required=True)
@@ -688,6 +846,11 @@ def main():
 
     args = parser.parse_args()
 
+    if args.db:
+        _DB_PATH = args.db
+    elif "MEIC_DB_PATH" in os.environ:
+        _DB_PATH = os.environ["MEIC_DB_PATH"]
+
     dispatch = {
         "init_db": cmd_init_db,
         "get_open_trades": cmd_get_open_trades,
@@ -696,6 +859,7 @@ def main():
         "get_eod_summary": cmd_get_eod_summary,
         "get_session_init": cmd_get_session_init,
         "set_session_init": cmd_set_session_init,
+        "get_range_summary": cmd_get_range_summary,
         "get_fee_estimate": cmd_get_fee_estimate,
         "get_step_timing": cmd_get_step_timing,
         "save_trade": cmd_save_trade,

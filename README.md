@@ -44,6 +44,8 @@ claude
 
 (Prefer to configure by hand instead of `/setup`? Copy `config.example.json` to `config.json` and store credentials with `python src/tt.py secrets_set`.)
 
+> **Running on a headless Linux server** (no desktop)? There's no OS keyring there, so credential storage needs an encrypted-file or cloud-secret-manager backend — see [Headless / server credentials](docs/setup.md#headless--server-credentials-linux-without-a-desktop) in the setup guide.
+
 Then, inside Claude Code, pick a track:
 
 **Paper trading (recommended first)** — no capital, no live orders, runs all four risk profiles side by side:

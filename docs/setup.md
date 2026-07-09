@@ -38,6 +38,25 @@ python src/tt.py secrets_set
 
 This prompts for each credential with hidden input and preserves existing values if you press Enter without typing. `account_number` is optional; the SDK discovers accounts automatically if omitted. See `/setup` for a guided walkthrough, including connection verification.
 
+Credentials are stored via the [`keyring`](https://github.com/jaraco/keyring) library, which uses the OS secure store automatically — **Keychain** on macOS, **Credential Manager / DPAPI** on Windows, and the **Secret Service** (GNOME Keyring / KWallet) on a Linux desktop. All three encrypt credentials at rest and unlock them with your login session, which is the appropriate bar for a long-lived broker refresh token. Nothing is ever written to a file or environment variable, and `credentials.py` deliberately fails with `CredentialError("No keyring backend available.")` rather than falling back to anything insecure.
+
+#### Headless / server credentials (Linux without a desktop)
+
+A server or VPS with no desktop session has no Secret Service running, so `secrets_set` will fail with *"No keyring backend available."* You have two secure ways to run there — pick based on how production-grade the box is. **Do not** fall back to a plaintext `.env`, a config-file secret, or a shell environment variable: the refresh token is persistent broker access and plaintext at rest fails any reasonable security review.
+
+**Option A — encrypted file backend (`keyrings.cryptfile`), simplest.** This is a drop-in `keyring` backend, so `secrets_set` and the agent use it with **no code change** — credentials live in an AES-encrypted file unlocked by a passphrase you enter at session start:
+
+```bash
+pip install keyrings.cryptfile
+# Select it as the active backend (persists in keyring's config):
+python -c "import keyring, keyrings.cryptfile.cryptfile as c; keyring.set_keyring(c.CryptFileKeyring())"
+python src/tt.py secrets_set          # prompts for the encryption passphrase, then each secret
+```
+
+You'll be prompted for the passphrase again the first time the agent reads a secret in a new session. To avoid an interactive prompt in a fully unattended daemon, supply it via the backend's `KEYRING_CRYPTFILE_PASSWORD` environment variable set only in the daemon's own environment (not in a committed file) — this keeps the passphrase out of the repo and off disk while accepting that it lives in the process environment for the session.
+
+**Option B — systemd or a cloud secret manager, production-grade.** On a systemd-managed host, deliver the secrets with [`systemd-creds` / `LoadCredential=`](https://systemd.io/CREDENTIALS/) (TPM-backed encryption, exposed to the process via tmpfs). For a cloud deployment, pull them at startup from HashiCorp Vault, AWS Secrets Manager, or GCP Secret Manager (IAM-scoped, audited, rotatable) and hand them to `set_secret` in-process. Both keep the secrets off the box's persistent disk entirely and are the recommended path for a real server.
+
 ### 4. Configure the agent
 
 Copy the example config and edit it with your settings:

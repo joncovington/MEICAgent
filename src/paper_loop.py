@@ -60,6 +60,23 @@ logger = logging.getLogger("paper_loop")
 _stop = False
 
 
+def _pythonw():
+    """The windowless interpreter (pythonw.exe) next to sys.executable, so the scheduled task's
+    --once runs don't flash a console window every tick. Falls back to sys.executable."""
+    cand = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    return cand if os.path.exists(cand) else sys.executable
+
+
+def _emit(obj):
+    """Write JSON to stdout when there is one. Under pythonw.exe (the headless task runs)
+    sys.stdout is None, so a plain print() would crash the run after its work is done."""
+    try:
+        sys.stdout.write(json.dumps(obj, default=str) + "\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def _setup_logging(console: bool = True):
     _LOG_FILE.parent.mkdir(exist_ok=True)
     handlers = [logging.FileHandler(_LOG_FILE)]
@@ -365,19 +382,19 @@ def _cmd_status():
         "scheduled_task": _task_installed(),  # the recommended --install-task automation
         "open_positions": _open_count(),
     }
-    print(json.dumps(info))
+    _emit((info))
 
 
 def _cmd_stop():
     pid = _running_pid()
     if pid is None:
-        print(json.dumps({"ok": False, "error": "not running"}))
+        _emit(({"ok": False, "error": "not running"}))
         return
     try:
         os.kill(pid, signal.SIGTERM)
-        print(json.dumps({"ok": True, "signal": "SIGTERM", "pid": pid}))
+        _emit(({"ok": True, "signal": "SIGTERM", "pid": pid}))
     except Exception as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}))
+        _emit(({"ok": False, "error": str(exc)}))
 
 
 def _spawn_detached():
@@ -388,7 +405,7 @@ def _spawn_detached():
     explicitly with --stop."""
     existing = _running_pid()
     if existing is not None:
-        print(json.dumps({"ok": False, "error": f"Paper loop already running (pid {existing})."}))
+        _emit(({"ok": False, "error": f"Paper loop already running (pid {existing})."}))
         return
     kwargs = {}
     if os.name == "nt":
@@ -402,7 +419,7 @@ def _spawn_detached():
                      stderr=subprocess.DEVNULL, close_fds=True, cwd=str(_ROOT), **kwargs)
     time.sleep(2)
     pid = _running_pid()
-    print(json.dumps({"ok": pid is not None, "pid": pid,
+    _emit(({"ok": pid is not None, "pid": pid,
                       "detail": "daemon spawned" if pid else "spawn did not register a PID yet"}))
 
 
@@ -487,10 +504,11 @@ def _release_once_lock():
 
 def _install_task():
     if os.name != "nt":
-        print(json.dumps({"ok": False, "error": "scheduled-task install is Windows-only; on "
+        _emit(({"ok": False, "error": "scheduled-task install is Windows-only; on "
                           "other OSes run `python src/paper_loop.py` in a terminal or via cron"}))
         return
-    tr = f'"{sys.executable}" "{os.path.abspath(__file__)}" --once'
+    # pythonw.exe = no console window, so the every-2-min --once run is truly headless.
+    tr = f'"{_pythonw()}" "{os.path.abspath(__file__)}" --once'
     r = subprocess.run(["schtasks", "/Create", "/TN", _TASK_NAME, "/TR", tr,
                         "/SC", "MINUTE", "/MO", "2", "/F", "/IT"],
                        capture_output=True, text=True)
@@ -498,17 +516,17 @@ def _install_task():
     # Fire one run immediately so positions are managed without waiting for the first tick.
     if ok:
         subprocess.run(["schtasks", "/Run", "/TN", _TASK_NAME], capture_output=True, text=True)
-    print(json.dumps({"ok": ok, "task": _TASK_NAME, "cadence": "every 2 min",
+    _emit(({"ok": ok, "task": _TASK_NAME, "cadence": "every 2 min",
                       "detail": (r.stdout or r.stderr).strip()}))
 
 
 def _uninstall_task():
     if os.name != "nt":
-        print(json.dumps({"ok": False, "error": "Windows-only"}))
+        _emit(({"ok": False, "error": "Windows-only"}))
         return
     subprocess.run(["schtasks", "/End", "/TN", _TASK_NAME], capture_output=True, text=True)
     r = subprocess.run(["schtasks", "/Delete", "/TN", _TASK_NAME, "/F"], capture_output=True, text=True)
-    print(json.dumps({"ok": r.returncode == 0, "detail": (r.stdout or r.stderr).strip()}))
+    _emit(({"ok": r.returncode == 0, "detail": (r.stdout or r.stderr).strip()}))
 
 
 def main():
@@ -548,20 +566,20 @@ def main():
     if args.once:
         _setup_logging(console=True)
         if not _acquire_once_lock():
-            print(json.dumps({"ok": True, "skipped": "another --once is already running"}))
+            _emit(({"ok": True, "skipped": "another --once is already running"}))
             return
         try:
             summary = run_iteration(_load_config(), force=args.force)
         finally:
             _release_once_lock()
-        print(json.dumps({"ok": True, "summary": summary}, default=str))
+        _emit({"ok": True, "summary": summary})
         return
 
     # Bare invocation (or the internal --_run child): run the loop in this process. Foreground
     # in a terminal, or the detached child spawned by --start.
     existing = _running_pid()
     if existing is not None:
-        print(json.dumps({"ok": False, "error": f"Paper loop already running (pid {existing}). "
+        _emit(({"ok": False, "error": f"Paper loop already running (pid {existing}). "
                                                  f"Run 'python src/paper_loop.py --stop' first."}))
         raise SystemExit(1)
     _setup_logging(console=False)  # daemon: file-only, no fragile stdout dependency

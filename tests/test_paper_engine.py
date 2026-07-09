@@ -333,6 +333,22 @@ def test_evaluate_open_trade_stops_call_side_when_cost_reaches_trigger():
     assert decision["action"] == "stop_call"
 
 
+def test_evaluate_open_trade_does_not_restop_an_already_stopped_side():
+    # A 'partial' IC whose call side was already stopped (call_stop_cost recorded) must NOT
+    # re-stop the call, even with the call spread expensive — it should manage only the put.
+    trade = {"put_symbol": "SP", "call_symbol": "SC", "long_put_symbol": "LP", "long_call_symbol": "LC",
+             "net_credit": 0.58, "status": "partial", "put_credit": 0.30, "call_credit": 0.28,
+             "call_stop_cost": 0.60, "put_stop_cost": None,
+             "stop_trigger_current": 0.93, "stop_limit_current": 1.02}
+    leg_quotes = {
+        "SP": {"bid": 0.20, "ask": 0.26, "mid": 0.23}, "LP": {"bid": 0.05, "ask": 0.08, "mid": 0.065},
+        "SC": {"bid": 0.70, "ask": 0.80, "mid": 0.75}, "LC": {"bid": 0.03, "ask": 0.06, "mid": 0.045},
+    }
+    decision = paper.evaluate_open_trade(trade, leg_quotes, _params(MODERATE), force_close=False)
+    # Call already closed → not re-stopped; put spread is cheap → hold.
+    assert decision["action"] == "hold"
+
+
 def test_evaluate_open_trade_force_close_overrides_hold():
     trade = {"put_symbol": "SP", "call_symbol": "SC", "long_put_symbol": "LP", "long_call_symbol": "LC",
               "net_credit": 0.58, "status": "open", "put_credit": 0.30, "call_credit": 0.28,

@@ -14,12 +14,14 @@ Report the per-symbol, per-profile outcomes from the JSON it prints (fills, skip
 
 ## Unattended session
 
-For a full session that self-paces on the market-hours cadence without per-iteration invocation, use `/paper-start` (which launches `src/paper_loop.py` as a hidden background daemon) — or start it directly:
+For a full session that runs on its own without per-iteration invocation, use `/paper-start`, which registers a Windows scheduled task running `--once` every 2 minutes (robust, self-healing, persists across sessions, time-gated to market hours). Manage it directly with:
 
 ```bash
-python src/paper_loop.py --status   # check
-Start-Process python -ArgumentList 'src/paper_loop.py' -WorkingDirectory $PWD -WindowStyle Hidden
-python src/paper_loop.py --stop     # stop
+python src/paper_loop.py --install-task    # register + fire the first run (recommended)
+python src/paper_loop.py --status          # daemon/task status + open-position count
+python src/paper_loop.py --uninstall-task  # stop the unattended session
 ```
+
+On non-Windows hosts, run `python src/paper_loop.py` in a terminal (or wire a cron job to `--once`). A long-running detached daemon (`--start`) also exists but is less robust on Windows than the scheduled task.
 
 Details of the metrics, gates, force-close cascade, and graduation criteria are in `docs/paper-trading.md`.

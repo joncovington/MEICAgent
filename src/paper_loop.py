@@ -45,7 +45,9 @@ except ImportError:
 
 _ROOT = Path(__file__).resolve().parent.parent
 _PID_FILE = _ROOT / "data" / "paper_loop.pid"
+_LOCK_FILE = _ROOT / "data" / "paper_loop.once.lock"
 _LOG_FILE = _ROOT / "logs" / "paper_loop.log"
+_TASK_NAME = "MEICAgent-PaperLoop"
 _PAPER_DB = str(_ROOT / "data" / "paper_trades.db")
 _CONFIG_PATH = _ROOT / "config.json"
 _TT = [sys.executable, str(_ROOT / "src" / "tt.py")]
@@ -240,8 +242,11 @@ def _open_count():
 # Iteration
 # ---------------------------------------------------------------------------
 
-def run_iteration(cfg):
+def run_iteration(cfg, force=False):
     now = _now_et()
+    if not force and not _is_trading_time(now, cfg):
+        logger.info("outside trading window (%s ET) — skipping.", now.strftime("%H:%M"))
+        return {"skipped": "outside_trading_window"}
     today = now.strftime("%Y-%m-%d")
     now_et = now.strftime("%H:%M")
     vix = _fetch_vix()
@@ -345,9 +350,21 @@ def _running_pid():
     return None
 
 
+def _task_installed():
+    if os.name != "nt":
+        return False
+    r = subprocess.run(["schtasks", "/Query", "/TN", _TASK_NAME], capture_output=True, text=True)
+    return r.returncode == 0
+
+
 def _cmd_status():
     pid = _running_pid()
-    info = {"running": pid is not None, "pid": pid, "open_positions": _open_count()}
+    info = {
+        "daemon_running": pid is not None,   # a long-running --start daemon (if used)
+        "pid": pid,
+        "scheduled_task": _task_installed(),  # the recommended --install-task automation
+        "open_positions": _open_count(),
+    }
     print(json.dumps(info))
 
 
@@ -363,14 +380,51 @@ def _cmd_stop():
         print(json.dumps({"ok": False, "error": str(exc)}))
 
 
+def _spawn_detached():
+    """Launch a fully detached background copy of the daemon and return. On Windows this uses
+    DETACHED_PROCESS (no console at all) + a new process group, so the daemon can't be stopped
+    by stray CTRL_C/CTRL_CLOSE console events from whatever shell launched it — the failure
+    mode that made -WindowStyle Hidden / Task Scheduler launches exit within seconds. Stop it
+    explicitly with --stop."""
+    existing = _running_pid()
+    if existing is not None:
+        print(json.dumps({"ok": False, "error": f"Paper loop already running (pid {existing})."}))
+        return
+    kwargs = {}
+    if os.name == "nt":
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--_run"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True, cwd=str(_ROOT), **kwargs)
+    time.sleep(2)
+    pid = _running_pid()
+    print(json.dumps({"ok": pid is not None, "pid": pid,
+                      "detail": "daemon spawned" if pid else "spawn did not register a PID yet"}))
+
+
 def _loop():
     _PID_FILE.parent.mkdir(exist_ok=True)
     _PID_FILE.write_text(str(os.getpid()))
     signal.signal(signal.SIGTERM, _handle_signal)
-    try:
-        signal.signal(signal.SIGINT, _handle_signal)
-    except Exception:
-        pass
+    if os.name == "nt":
+        # A detached daemon can still receive stray CTRL_C/CTRL_BREAK console events (e.g. when
+        # the launching shell closes) that would otherwise trip the graceful _stop and exit the
+        # loop within seconds. Ignore them; --stop hard-terminates via TerminateProcess instead.
+        for _sig in (signal.SIGINT, getattr(signal, "SIGBREAK", None)):
+            if _sig is not None:
+                try:
+                    signal.signal(_sig, signal.SIG_IGN)
+                except Exception:
+                    pass
+    else:
+        try:
+            signal.signal(signal.SIGINT, _handle_signal)
+        except Exception:
+            pass
     logger.info("Paper loop daemon started (pid %d).", os.getpid())
     try:
         while not _stop:
@@ -394,11 +448,85 @@ def _loop():
         logger.info("Paper loop daemon stopped.")
 
 
+# ---------------------------------------------------------------------------
+# --once concurrency lock (the scheduled task fires every 2 min; a slow iteration
+# must not overlap the next and double-process the paper DB)
+# ---------------------------------------------------------------------------
+
+def _acquire_once_lock():
+    try:
+        fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:  # steal a stale lock (a prior --once that died mid-run)
+            if time.time() - os.path.getmtime(_LOCK_FILE) > 180:
+                os.unlink(_LOCK_FILE)
+                return _acquire_once_lock()
+        except OSError:
+            pass
+        return False
+
+
+def _release_once_lock():
+    try:
+        os.unlink(_LOCK_FILE)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Scheduled-task automation (the robust unattended launcher on Windows)
+# ---------------------------------------------------------------------------
+# A long-running detached daemon proved fragile on Windows (stray console events / abrupt
+# death of a child-spawning process). Instead the automation registers a Task Scheduler job
+# that runs `--once` every 2 minutes — each run is a short-lived process that reliably
+# completes, self-heals if one fails, no-ops outside market hours (time-gated), and persists
+# across sessions independent of any launching shell.
+
+def _install_task():
+    if os.name != "nt":
+        print(json.dumps({"ok": False, "error": "scheduled-task install is Windows-only; on "
+                          "other OSes run `python src/paper_loop.py` in a terminal or via cron"}))
+        return
+    tr = f'"{sys.executable}" "{os.path.abspath(__file__)}" --once'
+    r = subprocess.run(["schtasks", "/Create", "/TN", _TASK_NAME, "/TR", tr,
+                        "/SC", "MINUTE", "/MO", "2", "/F", "/IT"],
+                       capture_output=True, text=True)
+    ok = r.returncode == 0
+    # Fire one run immediately so positions are managed without waiting for the first tick.
+    if ok:
+        subprocess.run(["schtasks", "/Run", "/TN", _TASK_NAME], capture_output=True, text=True)
+    print(json.dumps({"ok": ok, "task": _TASK_NAME, "cadence": "every 2 min",
+                      "detail": (r.stdout or r.stderr).strip()}))
+
+
+def _uninstall_task():
+    if os.name != "nt":
+        print(json.dumps({"ok": False, "error": "Windows-only"}))
+        return
+    subprocess.run(["schtasks", "/End", "/TN", _TASK_NAME], capture_output=True, text=True)
+    r = subprocess.run(["schtasks", "/Delete", "/TN", _TASK_NAME, "/F"], capture_output=True, text=True)
+    print(json.dumps({"ok": r.returncode == 0, "detail": (r.stdout or r.stderr).strip()}))
+
+
 def main():
     parser = argparse.ArgumentParser(description="MEICAgent paper-trading loop daemon")
-    parser.add_argument("--status", action="store_true", help="Print daemon status and exit")
-    parser.add_argument("--stop", action="store_true", help="Stop a running daemon")
-    parser.add_argument("--once", action="store_true", help="Run one iteration and exit (testing)")
+    parser.add_argument("--install-task", action="store_true",
+                        help="Register a Windows scheduled task that runs --once every 2 min "
+                             "(the recommended unattended launcher) and fire one run now")
+    parser.add_argument("--uninstall-task", action="store_true",
+                        help="Remove the scheduled task (stops the unattended paper session)")
+    parser.add_argument("--start", action="store_true",
+                        help="Spawn a long-running detached daemon in the background (alternative "
+                             "to the scheduled task; less robust on Windows)")
+    parser.add_argument("--status", action="store_true", help="Print daemon/task status and exit")
+    parser.add_argument("--stop", action="store_true", help="Stop a running --start daemon")
+    parser.add_argument("--once", action="store_true", help="Run a single iteration and exit")
+    parser.add_argument("--force", action="store_true",
+                        help="With --once, run even outside market hours (for testing)")
+    parser.add_argument("--_run", action="store_true", help=argparse.SUPPRESS)  # internal: the detached child
     args = parser.parse_args()
 
     if args.status:
@@ -407,13 +535,30 @@ def main():
     if args.stop:
         _cmd_stop()
         return
+    if args.install_task:
+        _install_task()
+        return
+    if args.uninstall_task:
+        _uninstall_task()
+        return
+    if args.start:
+        _spawn_detached()
+        return
 
     if args.once:
         _setup_logging(console=True)
-        summary = run_iteration(_load_config())
+        if not _acquire_once_lock():
+            print(json.dumps({"ok": True, "skipped": "another --once is already running"}))
+            return
+        try:
+            summary = run_iteration(_load_config(), force=args.force)
+        finally:
+            _release_once_lock()
         print(json.dumps({"ok": True, "summary": summary}, default=str))
         return
 
+    # Bare invocation (or the internal --_run child): run the loop in this process. Foreground
+    # in a terminal, or the detached child spawned by --start.
     existing = _running_pid()
     if existing is not None:
         print(json.dumps({"ok": False, "error": f"Paper loop already running (pid {existing}). "

@@ -418,8 +418,12 @@ def evaluate_open_trade(trade: dict, leg_quotes: dict, params: dict, force_close
         return {"action": "hold", "reason": "quotes_unavailable"}
 
     net_credit = trade["net_credit"]
-    put_open = trade["status"] == "open" or (trade["status"] == "partial" and trade.get("put_stop_order_id") is None)
-    call_open = trade["status"] == "open" or (trade["status"] == "partial" and trade.get("call_stop_order_id") is None)
+    # A side is still open only if it hasn't already been closed. In paper, a closed side is
+    # marked by its recorded stop cost (put_stop_cost / call_stop_cost) — the live-only
+    # *_stop_order_id fields are never set here, so keying off them would re-stop an
+    # already-stopped side on every subsequent iteration and double-count its P&L.
+    put_open = trade["status"] in ("open", "partial") and trade.get("put_stop_cost") is None
+    call_open = trade["status"] in ("open", "partial") and trade.get("call_stop_cost") is None
 
     ic_current_cost_mid = (sq["mid"] + cq["mid"]) - (lpq["mid"] + lcq["mid"])
     if trade["status"] == "open" and ic_current_cost_mid <= params.get("profit_target_pct", 0.50) * net_credit:

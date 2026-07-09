@@ -266,7 +266,7 @@ See [docs/risk-profiles.md](docs/risk-profiles.md) for the full rationale, trade
 
    **Timing end** (per symbol, after this symbol's Step 7 completes, whether or not an entry was executed): capture an end timestamp the same way as the Step 4b start, compute the elapsed milliseconds, and log it via `python src/db.py log_loop_action --symbol <SYM> --action timing_entry_evaluation --duration_ms <elapsed>`. Review with `python src/db.py get_step_timing --action timing_entry_evaluation`.
 
-8. **Record and notify** — runs once per iteration, after every symbol's sub-loop (Steps 4b/6/7) has completed. Logs a per-symbol `loop_log` row for each symbol processed this iteration (tagged with that symbol) plus one account-wide summary row (`symbol` left `NULL`), and a one-line status message covering all symbols, then schedules the next wakeup per the interval table below. After 15:55 on a trading day, runs the EOD sequence once for the whole account: persists closing NLV, spawns the EOD report (covering every symbol), and logs completion.
+8. **Record and notify** — runs once per iteration, after every symbol's sub-loop (Steps 4b/6/7) has completed. Logs a per-symbol `loop_log` row for each symbol processed this iteration (tagged with that symbol) plus one account-wide summary row (`symbol` left `NULL`), and a one-line status message covering all symbols, then schedules the next wakeup per the interval table below. After 15:55 on a trading day, runs the EOD sequence once for the whole account: persists closing NLV, spawns the live EOD report (`/eod-report live`, covering every symbol), and logs completion. (The paper loop writes its own deterministic paper EOD report automatically; a manual `/eod-report` with no argument reproduces both.)
 
 ---
 

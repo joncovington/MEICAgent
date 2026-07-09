@@ -87,6 +87,35 @@ under `data/replay_cache/<date>.json` so re-running a day never re-hits the API.
 does not spell out terms for driving an external engine from its API. **Confirm this is
 permitted under their terms before relying on replay at scale.**
 
+## Physical-settlement exit handling (QQQ/IWM and other non-cash-settled symbols)
+
+SPX/XSP are cash-settled European-style — a missed close just settles to cash. QQQ/IWM (any
+symbol **not** in `cash_settled_symbols`) are physically-settled American-style: a short leg
+left open into expiration risks assignment into shares, and a strike pinned at-the-money at
+the bell has an ambiguous ITM/OTM outcome. So paper mirrors the live loop's settlement-aware
+exit behavior rather than treating every symbol identically:
+
+- **Earlier force-close.** Non-cash-settled positions force-close at
+  `physical_settlement_force_close_time` (default 15:30 ET), ~15 min ahead of the general
+  `force_close_time` (15:45), staying clear of the illiquid, pin-risk-heavy final minutes.
+  (`force_close_active` in `src/paper.py`.)
+- **Full event force-close cascade.** Paper now also honors the FOMC-blackout (13:30 ET) and
+  triple-witching/quarterly-expiry (14:00 ET) force-closes, which the earlier build omitted —
+  these apply to all symbols, cash-settled or not.
+- **Modeled assignment/pin friction.** When a physically-settled position force-closes, paper
+  adds `physical_settlement_exit_friction` (per spread) to the cost-to-close, plus a
+  `pin_risk_penalty_pct_of_width` penalty when a short strike is within `pin_risk_threshold_pct`
+  of spot. This makes QQQ/IWM paper P&L strictly worse than an equivalent cash-settled close,
+  so paper doesn't overstate their safety. The friction figures are deliberately conservative
+  and config-tunable — calibrate them against a tiny-live run (same philosophy as the 20–40%
+  graduation discount). Cash-settled symbols pay no friction (clean settlement). Every such
+  close is recorded with a specific `exit_reason` (`force_close_physical_settlement`,
+  `force_close_fomc`, `force_close_expiry_event`, or `force_close_eod`) for auditability.
+
+**Live vs. paper:** live trading pays *real* fills, so the friction figures don't apply there —
+live instead flattens physical positions early (same `physical_settlement_force_close_time`) and
+escalates a failed close to `CRITICAL` (see CLAUDE.md Step 2 / stop-management.md Step 7).
+
 ## Metrics & graduation gate
 
 Virtual bankroll: **$100,000 per profile**. A profile is eligible for live only when **all six**
@@ -125,6 +154,13 @@ likely overfit), avg-win/avg-loss, max consecutive losses, realized-vs-unrealize
 - **Replay's GEX and VIX1D-ratio gates never fire** (data unavailable) — replay entry
   frequency for those specific triggers will run slightly higher than forward-paper's. This is
   a known, documented asymmetry, not a bug.
+- **Physical-settlement risk is modeled only at force-close, not intraday.** The friction/pin
+  model (above) captures the assignment/pin cost of *closing* a QQQ/IWM position at the bell,
+  but does **not** simulate American-style *early* assignment during the session (e.g. a short
+  call going deep ITM near an ex-dividend date and being assigned at 11am). The live loop's
+  chosen scope is "earlier force-close + guardrails," not proactive early-assignment
+  management, so this tail is documented rather than modeled — treat QQQ/IWM paper results as
+  still slightly optimistic on assignment risk, on top of the general 20–40% discount.
 
 ## Multi-week cadence
 

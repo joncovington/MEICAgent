@@ -75,6 +75,16 @@
   "profit_target_pct": 0.50,
   "_profit_target_pct_note": "Close an IC when its current cost drops to <= this fraction of net_credit (0.50 = 50% profit captured).",
 
+  "physical_settlement_header": "===== Physical Settlement (non-cash-settled symbols, e.g. QQQ/IWM) =====",
+  "physical_settlement_force_close_time": "15:30",
+  "_physical_settlement_force_close_time_note": "Earlier force-close time (ET) for symbols NOT in cash_settled_symbols. Physically-settled American-style options (QQQ/IWM/etc.) are flattened ~15 min before the general force_close_time to avoid assignment/pin risk in the illiquid final minutes. Cash-settled symbols ignore this and use force_close_time.",
+  "physical_settlement_exit_friction": 0.05,
+  "_physical_settlement_exit_friction_note": "PAPER-TRADING ONLY. Per-spread price friction added to the cost-to-close when force-closing a physically-settled position, so paper P&L reflects the wider spreads / assignment risk real QQQ/IWM closes face vs a clean cash settlement. Live trading pays real fills, so this does not apply there.",
+  "pin_risk_threshold_pct": 0.002,
+  "_pin_risk_threshold_pct_note": "PAPER-TRADING ONLY. A short strike within this fraction (0.2%) of the underlying at force-close is treated as pinned (ambiguous assigned-vs-worthless outcome), triggering pin_risk_penalty_pct_of_width.",
+  "pin_risk_penalty_pct_of_width": 0.25,
+  "_pin_risk_penalty_pct_of_width_note": "PAPER-TRADING ONLY. Extra force-close cost, as a fraction of wing width, added on a pinned physically-settled short.",
+
   "delta_and_otm_guardrails_header": "===== Delta & OTM Guardrails =====",
   "max_call_delta_entry": 0.20,
   "max_call_delta_entry_open_volatile": 0.19,

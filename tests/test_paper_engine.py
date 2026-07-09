@@ -306,6 +306,105 @@ def test_evaluate_open_trade_force_close_overrides_hold():
     assert decision["put_open"] is True and decision["call_open"] is True
 
 
+# ── Physical-settlement exit hardening ───────────────────────────────────────
+
+def _force_close_trade():
+    return {"put_symbol": "SP", "call_symbol": "SC", "long_put_symbol": "LP", "long_call_symbol": "LC",
+            "net_credit": 0.58, "status": "open", "put_credit": 0.30, "call_credit": 0.28,
+            "put_strike": 583, "call_strike": 598, "wing_width": 5,
+            "stop_trigger_current": 0.93, "stop_limit_current": 1.02}
+
+
+_FC_LEG_QUOTES = {
+    "SP": {"bid": 0.24, "ask": 0.30, "mid": 0.27}, "LP": {"bid": 0.06, "ask": 0.09, "mid": 0.075},
+    "SC": {"bid": 0.20, "ask": 0.26, "mid": 0.23}, "LC": {"bid": 0.05, "ask": 0.08, "mid": 0.065},
+}
+
+
+def test_is_cash_settled_classification():
+    assert paper._is_cash_settled("SPX", BASE_CONFIG) is True
+    assert paper._is_cash_settled("XSP", BASE_CONFIG) is True
+    assert paper._is_cash_settled("QQQ", BASE_CONFIG) is False
+    assert paper._is_cash_settled("IWM", BASE_CONFIG) is False
+
+
+def test_cash_settled_force_close_has_no_friction():
+    base = paper.evaluate_open_trade(_force_close_trade(), _FC_LEG_QUOTES, _params(MODERATE),
+                                     force_close=True, underlying_price=590.5, is_cash_settled=True)
+    # No friction: exit = short_bid - long_ask
+    assert base["physical_friction_applied"] is False
+    assert base["put_exit_price"] == pytest.approx(max(0.24 - 0.09, 0), abs=1e-6)
+
+
+def test_physical_force_close_adds_friction():
+    friction = BASE_CONFIG.get("physical_settlement_exit_friction", 0.05)
+    phys = paper.evaluate_open_trade(_force_close_trade(), _FC_LEG_QUOTES, _params(MODERATE),
+                                     force_close=True, underlying_price=590.5, is_cash_settled=False)
+    assert phys["physical_friction_applied"] is True
+    # underlying 590.5 is far from both strikes (583 put / 598 call) → no pin penalty, only friction
+    assert phys["put_exit_price"] == pytest.approx(max(0.24 - 0.09, 0) + friction, abs=1e-6)
+    assert phys["call_exit_price"] == pytest.approx(max(0.20 - 0.08, 0) + friction, abs=1e-6)
+    # friction makes the physical close strictly more expensive (worse P&L) than cash-settled
+    base = paper.evaluate_open_trade(_force_close_trade(), _FC_LEG_QUOTES, _params(MODERATE),
+                                     force_close=True, underlying_price=590.5, is_cash_settled=True)
+    assert phys["put_exit_price"] > base["put_exit_price"]
+
+
+def test_pin_penalty_fires_when_short_strike_atm():
+    friction = BASE_CONFIG.get("physical_settlement_exit_friction", 0.05)
+    pen_pct = BASE_CONFIG.get("pin_risk_penalty_pct_of_width", 0.25)
+    # underlying pinned right at the 598 short call → pin penalty on the call side only
+    phys = paper.evaluate_open_trade(_force_close_trade(), _FC_LEG_QUOTES, _params(MODERATE),
+                                     force_close=True, underlying_price=598.0, is_cash_settled=False)
+    expected_call = max(0.20 - 0.08, 0) + friction + pen_pct * 5  # wing_width 5
+    assert phys["call_exit_price"] == pytest.approx(expected_call, abs=1e-6)
+    # put strike 583 is ~2.5% away from 598 → no pin penalty on the put side
+    assert phys["put_exit_price"] == pytest.approx(max(0.24 - 0.09, 0) + friction, abs=1e-6)
+
+
+def test_pin_penalty_zero_when_underlying_missing():
+    assert paper._pin_penalty(598, None, 5, BASE_CONFIG) == 0.0
+    assert paper._pin_penalty(None, 598, 5, BASE_CONFIG) == 0.0
+
+
+def _snap(now_et, date="2026-07-15"):
+    return {"symbol": "QQQ", "date": date, "now_et": now_et, "underlying_price": 470.0}
+
+
+def test_force_close_active_physical_earlier_than_cash():
+    base = BASE_CONFIG
+    # 15:35 ET: past the 15:30 physical close but before the 15:45 general close
+    active_phys, reason_phys = paper.force_close_active(_snap("15:35"), base, is_cash_settled=False)
+    active_cash, reason_cash = paper.force_close_active(_snap("15:35"), base, is_cash_settled=True)
+    assert active_phys is True and reason_phys == "force_close_physical_settlement"
+    assert active_cash is False and reason_cash is None
+
+
+def test_force_close_active_general_eod_all_symbols():
+    for is_cash in (True, False):
+        active, reason = paper.force_close_active(_snap("15:46"), BASE_CONFIG, is_cash_settled=is_cash)
+        assert active is True
+        # physical trips the earlier physical reason; cash trips the eod reason
+        assert reason in ("force_close_physical_settlement", "force_close_eod")
+
+
+def test_force_close_active_fomc_blackout():
+    fomc_date = BASE_CONFIG["fomc_dates_2026"][0]
+    active, reason = paper.force_close_active(_snap("13:35", date=fomc_date), BASE_CONFIG, is_cash_settled=True)
+    assert active is True and reason == "force_close_fomc"
+
+
+def test_force_close_active_quarterly_expiry_event():
+    q_date = BASE_CONFIG["quarterly_expiry_dates_2026"][0]
+    active, reason = paper.force_close_active(_snap("14:05", date=q_date), BASE_CONFIG, is_cash_settled=True)
+    assert active is True and reason == "force_close_expiry_event"
+
+
+def test_force_close_active_inactive_midday():
+    active, reason = paper.force_close_active(_snap("11:00"), BASE_CONFIG, is_cash_settled=False)
+    assert active is False and reason is None
+
+
 # ── get_range_summary (DB integration) ───────────────────────────────────────
 
 @pytest.fixture

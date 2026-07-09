@@ -33,6 +33,7 @@ import threading
 import time
 import traceback
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytz
@@ -64,12 +65,22 @@ def _setup_logging() -> None:
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    fh = logging.FileHandler(_LOG_FILE)
+    # Rotate at 10 MB, keep 5 backups (≈60 MB cap) so the log can't grow without bound —
+    # it had reached multiple GB because the DXLink SDK logs every raw Quote/Trade/Greeks
+    # message at DEBUG. Handler level INFO drops that firehose regardless of which library
+    # logger emits it (the level check on a propagated record happens at the handler).
+    fh = RotatingFileHandler(_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
     root.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(logging.INFO)
     sh.setFormatter(fmt)
     root.addHandler(sh)
+    # Belt-and-suspenders: silence the chattiest third-party loggers at the source
+    # (the DXLink message dump, per-poll HTTP request lines, websocket frames).
+    for _noisy in ("tastytrade", "httpx", "httpcore", "websockets", "asyncio"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 

@@ -79,14 +79,14 @@ def _emit(obj):
 
 def _setup_logging(console: bool = True):
     _LOG_FILE.parent.mkdir(exist_ok=True)
-    handlers = [logging.FileHandler(_LOG_FILE)]
+    handlers = [logging.FileHandler(_LOG_FILE, encoding="utf-8")]
     # A detached, hidden-window process (Start-Process -WindowStyle Hidden) can have an
     # invalid stdout; writing to it via a StreamHandler risks killing the daemon. Only attach
     # the console handler for interactive/--once runs where stdout is real.
     if console and sys.stdout is not None and sys.stdout.isatty():
         handlers.append(logging.StreamHandler(sys.stdout))
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s", handlers=handlers)
+    logging.basicConfig(level=logging.INFO, handlers=handlers,
+                        format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
 
 def _handle_signal(signum, frame):
@@ -259,6 +259,36 @@ def _open_count():
 # Iteration
 # ---------------------------------------------------------------------------
 
+_PROF_ABBR = {"conservative": "cons", "moderate": "mod", "aggressive": "agg", "very-aggressive": "vagg"}
+
+
+def _fmt_symbol(sym, info):
+    """One readable clause per symbol. Collapses the common case where all four profiles did
+    the same thing (e.g. all skipped for the same reason) into 'all <reason>'; otherwise lists
+    each profile's outcome. Fills/exits already read as 'FILL $x' / 'EXIT <action>'."""
+    if info.get("error"):
+        return f"{sym}: ERROR {info['error']}"
+    ivr = info.get("ivr")
+    ivr_s = f"{ivr:.2f}" if isinstance(ivr, (int, float)) else "—"
+    outc = info.get("outcomes") or {}
+    ordered = [outc.get(p) for p in paper.ALL_PROFILE_NAMES]
+    if not any(ordered):
+        return f"{sym}(ivr {ivr_s}): —"
+    if len(set(ordered)) == 1 and ordered[0] is not None:
+        return f"{sym}(ivr {ivr_s}): all {ordered[0]}"
+    parts = " ".join(f"{_PROF_ABBR.get(p, p)}:{outc.get(p, '—')}" for p in paper.ALL_PROFILE_NAMES)
+    return f"{sym}(ivr {ivr_s}): {parts}"
+
+
+def _format_iteration(now_et, vix, vix1d_ratio, delta_target, summary):
+    """A compact, human-readable one-line iteration summary for the log and the dashboard."""
+    vix_s = f"{vix:.1f}" if isinstance(vix, (int, float)) else "—"
+    ratio_s = f"{vix1d_ratio:.2f}" if isinstance(vix1d_ratio, (int, float)) else "—"
+    header = f"[{now_et} ET] VIX {vix_s}  1D-ratio {ratio_s}  delta {delta_target}"
+    body = "   ".join(_fmt_symbol(s, summary[s]) for s in summary)
+    return f"{header}   {body}"
+
+
 def run_iteration(cfg, force=False):
     now = _now_et()
     if not force and not _is_trading_time(now, cfg):
@@ -292,28 +322,27 @@ def run_iteration(cfg, force=False):
             "candidates": candidates, "leg_quotes": leg_quotes,
         }
         result = paper.process_symbol(snapshot, _PAPER_DB, "paper")
-        # Compact per-profile outcome for the log
+        # Per-profile outcome for the log — fills and exits made to stand out from skips.
         outcomes = {}
         for prof, actions in result.get("results", {}).items():
             for a in actions:
                 if a.get("entry") == "filled":
-                    outcomes[prof] = f"FILLED {a.get('net_credit')}"
+                    outcomes[prof] = f"FILL ${a.get('net_credit')}"
                 elif a.get("entry") == "skipped":
                     outcomes.setdefault(prof, a.get("reason"))
                 elif "decision" in a:
                     act = a["decision"].get("action")
                     if act and act != "hold":
-                        outcomes[prof] = f"exit:{act}"
+                        outcomes[prof] = f"EXIT {act}"
         summary[symbol] = {"ivr": ivr, "widths": [c["wing_width"] for c in candidates],
                            "outcomes": outcomes, "cand_err": cand_err}
 
-    reason = f"vix={vix} vix1d_ratio={vix1d_ratio} delta={delta_target} " + \
-             " | ".join(f"{s}:{v.get('outcomes', v.get('error'))}" for s, v in summary.items())
+    reason = _format_iteration(now_et, vix, vix1d_ratio, delta_target, summary)
     try:
         _subrun(_DB + ["log_loop_action", "--action", "paper_iteration", "--reasoning", reason[:900]])
     except Exception:
         pass
-    logger.info("iteration @ %s ET | %s", now_et, reason)
+    logger.info("%s", reason)
     return summary
 
 

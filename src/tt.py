@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import credentials as _creds
 import gex_math
 from session import get_session
+from cherrypit import dxfeed as _dx
 
 # ---------------------------------------------------------------------------
 # Logging — each invocation is a short-lived subprocess whose only normal
@@ -446,50 +447,24 @@ def _atm_window(options: list, strike_count: int, around_price: float | None) ->
     return [o for o in options if _strike(o) in keep]
 
 
+# On-demand DXLink collectors — thin shims over cherrypit.dxfeed (src/_core). The broker session is
+# passed in explicitly, so a missing-credentials CredentialError surfaces to the caller here instead of
+# being swallowed inside the collector's broad except (the shared implementation never fetches it).
 async def _collect_events(event_cls, symbols: list[str], timeout: float,
                           extract=None, label: str = "events") -> dict:
-    from tastytrade import DXLinkStreamer
-    out: dict = {}
-    symbols = [s for s in symbols if s]
-    if not symbols:
-        return out
-
-    async def _drain(streamer):
-        remaining = set(symbols)
-        async for event in streamer.listen(event_cls):
-            value = extract(event) if extract else event
-            if value is not None:
-                out[event.event_symbol] = value
-            remaining.discard(event.event_symbol)
-            if not remaining:
-                return
-
-    try:
-        session = get_session()
-        async with DXLinkStreamer(session) as streamer:
-            await streamer.subscribe(event_cls, symbols)
-            await asyncio.wait_for(_drain(streamer), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
-    except Exception:
-        pass
-    return out
+    return await _dx.collect_events(get_session(), event_cls, symbols, timeout, extract=extract)
 
 
 async def _collect_greeks(symbols: list[str], timeout: float) -> dict:
-    from tastytrade.dxfeed import Greeks
-    return await _collect_events(Greeks, symbols, timeout, label="greeks")
+    return await _dx.collect_greeks(get_session(), symbols, timeout)
 
 
 async def _collect_last_prices(symbols: list[str], timeout: float) -> dict:
-    from tastytrade.dxfeed import Trade
-    return await _collect_events(Trade, symbols, timeout,
-                                 extract=lambda e: _num(e.price), label="last-price")
+    return await _dx.collect_last_prices(get_session(), symbols, timeout)
 
 
 async def _collect_quotes(symbols: list[str], timeout: float) -> dict:
-    from tastytrade.dxfeed import Quote
-    return await _collect_events(Quote, symbols, timeout, label="quotes")
+    return await _dx.collect_quotes(get_session(), symbols, timeout)
 
 
 # ---------------------------------------------------------------------------

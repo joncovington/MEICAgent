@@ -62,14 +62,7 @@
   "_min_net_credit_after_fees_note": "The fee-adjusted floor no longer uses a flat dollar constant (retired 2026-07-06). It now requires (ic_natural_bid * dollar_multiplier) - est_fee_per_contract to clear the same applicable pct-of-width floor above, converted to dollars. The old standalone min_credit absolute-dollar-per-symbol floor was also retired as redundant once this fee check became width/IV-aware.",
   "fee_estimate_lookback_trades": 20,
   "fee_estimate_min_sample_size": 5,
-  "fee_estimate_fallback_per_contract": {
-    "SPX": 6.89,
-    "XSP": 4.49,
-    "NDX": 5.49,
-    "RUT": 5.21,
-    "DEFAULT": 4.49
-  },
-  "_fee_estimate_fallback_per_contract_note": "Bootstrap $/contract-set fee estimate per symbol, used until fee_estimate_min_sample_size closed trades exist for that symbol; then the DB-derived average from get_fee_estimate takes over.",
+  "_fee_estimate_fallback_note": "The per-symbol fee fallback (used until fee_estimate_min_sample_size closed trades exist) is now COMPUTED by `db.py get_fee_estimate` (field fallback_per_contract, via cherrypit.fees.ic_open_fee) from the shared tastytrade schedule, not a config list.",
 
   "stops_header": "===== Stops (no profit target) =====",
   "stop_type": "spread",

@@ -435,6 +435,20 @@ def _rows_dicts(conn: sqlite3.Connection, where: list[str], params: list) -> lis
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def _ic_open_fee_fallback(symbol: str):
+    """Computed per-symbol IC open-fee from the shared tastytrade schedule (cherrypit.fees), replacing
+    MEIC's hand-maintained fee_estimate_fallback_per_contract constants. Returns None if the core
+    submodule isn't present."""
+    core = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_core")
+    if os.path.isdir(core) and core not in sys.path:
+        sys.path.insert(0, core)
+    try:
+        from cherrypit.fees import ic_open_fee
+    except Exception:
+        return None
+    return ic_open_fee(symbol)
+
+
 def cmd_get_fee_estimate(args):
     """Estimate $/contract fee drag for a symbol from recent closed trades.
 
@@ -442,7 +456,8 @@ def cmd_get_fee_estimate(args):
     credit floor can pass a trade whose entire credit gets consumed by fees
     on symbols/wing-widths with high fee-to-premium ratios (e.g. XSP 2026-06-30:
     $4.00 gross credit, $4.96 fees, net -$0.97). Sample size is reported so
-    the caller can fall back to a config default when data is thin.
+    the caller can fall back to the computed `fallback_per_contract` (from the
+    shared fee schedule) when the sample is thin.
     """
     symbol = (args.symbol or "").upper()
     lookback = args.lookback or 20
@@ -466,6 +481,7 @@ def cmd_get_fee_estimate(args):
         "symbol": symbol,
         "sample_size": sample_size,
         "avg_fee_per_contract": avg_fee_per_contract,
+        "fallback_per_contract": _ic_open_fee_fallback(symbol),
         "total_fees": round(total_fees, 2),
         "total_contracts": total_contracts,
     })

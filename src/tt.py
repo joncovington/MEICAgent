@@ -1157,69 +1157,9 @@ def cmd_secrets_set(args) -> dict:
 
 
 def _compute_gex(chain_entries: list[dict], greeks: dict, oi: dict, spot: float) -> dict:
-    """Compute GEX profile from option chain entries, greeks cache, and OI cache.
-
-    Returns net_gex, gamma_flip (zero-gamma level), call_wall, put_wall, and per-strike breakdown.
-    GEX per strike = gamma × OI × 100 × spot² × 0.01
-    Call GEX is positive (dealer counter-trend); put GEX is positive magnitude but subtracted for net.
-    """
-    multiplier = 100
-    per_strike: dict[float, dict] = {}
-
-    for entry in chain_entries:
-        strike = _num(entry.get("strike_price"))
-        sym = entry.get("streamer_symbol")
-        if sym is None or strike is None or strike <= 0:
-            continue
-        g = greeks.get(sym)
-        open_interest = oi.get(sym)
-        if g is None or open_interest is None or open_interest == 0:
-            continue
-        gamma = _num(g.get("gamma") if isinstance(g, dict) else getattr(g, "gamma", None))
-        if gamma is None:
-            continue
-        gex_val = gex_math.dollar_gamma(gamma, open_interest, multiplier, spot)
-        opt_type = entry.get("option_type", "")
-        is_call = "C" in opt_type.upper()
-        if strike not in per_strike:
-            per_strike[strike] = {"strike": strike, "call_gex": 0.0, "put_gex": 0.0}
-        if is_call:
-            per_strike[strike]["call_gex"] += gex_val
-        else:
-            per_strike[strike]["put_gex"] += gex_val
-
-    if not per_strike:
-        return {"ok": False, "error": "insufficient GEX data — OI not yet cached (streamer must run first)"}
-
-    strikes_sorted = sorted(per_strike.values(), key=lambda x: x["strike"])
-    for s in strikes_sorted:
-        s["net_gex"] = s["call_gex"] - s["put_gex"]
-
-    net_gex = sum(s["net_gex"] for s in strikes_sorted)
-    call_wall = max(strikes_sorted, key=lambda x: x["call_gex"])["strike"]
-    put_wall  = max(strikes_sorted, key=lambda x: x["put_gex"])["strike"]
-
-    # Gamma flip: interpolate where cumulative net GEX crosses zero (scanning low→high strike)
-    gamma_flip = gex_math.interpolate_zero_gamma(strikes_sorted)
-
-    return {
-        "ok": True,
-        "net_gex": round(net_gex, 2),
-        "gex_positive": net_gex > 0,
-        "call_wall": call_wall,
-        "put_wall": put_wall,
-        "gamma_flip": gamma_flip,
-        "strikes_with_data": len(per_strike),
-        "per_strike": [
-            {
-                "strike": s["strike"],
-                "call_gex": round(s["call_gex"], 2),
-                "put_gex": round(s["put_gex"], 2),
-                "net_gex": round(s["net_gex"], 2),
-            }
-            for s in strikes_sorted
-        ],
-    }
+    """Compute GEX profile from chain entries, greeks cache, and OI cache — delegates to the shared
+    cherrypit.gex.compute_gex (via the gex_math shim). Output shape is unchanged."""
+    return gex_math.compute_gex(chain_entries, greeks, oi, spot)
 
 
 async def cmd_get_gex(args) -> dict:

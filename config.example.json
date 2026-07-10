@@ -133,29 +133,12 @@
   "orb_close_time": "15:30",
 
   "quarterly_expiry_and_triple_witching_header": "===== Quarterly Expiry & Triple Witching =====",
-  "quarterly_expiry_dates_2026": [
-    "2026-03-31", "2026-06-30", "2026-09-30", "2026-12-31"
-  ],
-  "triple_witching_dates_2026": [
-    "2026-03-20", "2026-06-19", "2026-09-18", "2026-12-18"
-  ],
   "quarterly_expiry_skip_open_volatile": true,
   "quarterly_expiry_min_call_otm_pct": 0.0067,
   "quarterly_expiry_max_intraday_range_pct": 0.005,
   "_quarterly_expiry_max_intraday_range_pct_note": "Halt new entries on quarterly-expiry dates once the underlying's intraday range (high-low) exceeds this fraction of its price (0.005 = 0.5%). Percentage-based so it scales across symbols; replaces the old fixed 35-point value that only made sense for SPX.",
 
   "fomc_header": "===== FOMC Calendar & Blackout =====",
-  "fomc_dates_2026": [
-    "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-10",
-    "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-16"
-  ],
   "fomc_blackout_start": "13:30",
-  "fomc_blackout_end": "14:30",
-
-  "holidays_header": "===== NYSE Holidays =====",
-  "nyse_holidays_2026": [
-    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
-    "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
-    "2026-11-26", "2026-12-25"
-  ]
+  "fomc_blackout_end": "14:30"
 }

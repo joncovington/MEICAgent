@@ -45,15 +45,15 @@ Requires: open trades list and current market data (underlying price, option cha
    - Underlying has moved against a short strike (within 2 points)
    - Gamma level is elevated (short delta > 0.25 on either side)
    - Expiry is approaching (within 90 minutes of close, tighten to 0.80 × net_credit)
-   - **FOMC pre-announcement (today in `fomc_dates_2026`, current time 13:00–13:30 ET):** tighten stop_trigger_current by 10% on all open ICs as a pre-announcement precaution.
+   - **FOMC pre-announcement (today is an FOMC day per `python src/tt.py get_calendar`, current time 13:00–13:30 ET):** tighten stop_trigger_current by 10% on all open ICs as a pre-announcement precaution.
    - Record any adjustment via:
 ```bash
 python src/db.py record_stop_adjustment --ic_order_id "<id>" --new_trigger <val> --new_limit <val> --reason "<reason>"
 ```
 
 7. **EOD, event force-close, and expiration** — the MEIC exit paths at end of day, in priority order. There is **no profit-target close** (Step 4); the only exits are per-side stops (Step 5), the closes below, and cash-settled expiration.
-   - **FOMC blackout** (today in `fomc_dates_2026`, current time ≥ `fomc_blackout_start` = 13:30 ET): close **all** open ICs — every symbol including cash-settled — immediately before the announcement window. Risk override.
-   - **Triple witching / quarterly expiry force-close** (today in `triple_witching_dates_2026` or `quarterly_expiry_dates_2026`, current time ≥ 14:00 ET): close **all** open ICs (every symbol including cash-settled). Risk override.
+   - **FOMC blackout** (today is an FOMC day per `python src/tt.py get_calendar`, current time ≥ `fomc_blackout_start` = 13:30 ET): close **all** open ICs — every symbol including cash-settled — immediately before the announcement window. Risk override.
+   - **Triple witching / quarterly expiry force-close** (today is a triple-witching or quarterly-expiry day per `python src/tt.py get_calendar`, current time ≥ 14:00 ET): close **all** open ICs (every symbol including cash-settled). Risk override.
    - **Discretionary gamma safety close** (after 15:00 ET): force-close any spread — regardless of settlement type — where the underlying is within ~0.5% of a short strike with < 30 min left, short-strike gamma is above ~0.10, or the spread value is accelerating faster than the software stop can track. A judgment-based backstop to the per-side stops.
    - **Physically-settled close** (symbol **not** in `cash_settled_symbols` — QQQ/IWM/equities/futures — current time ≥ `physical_settlement_force_close_time` = 15:30 ET, backstopped by `force_close_time` = 15:45 ET): close these before the bell. They must be closed, never left to expire — a failed close is a **critical, assignment-risk escalation** (immediate marketable-limit retry, `CRITICAL` log if still open), since American-style physically-settled options can be assigned into shares both at expiration and, when a short goes deep ITM, before it. See the assignment-risk escalation in Step 2.
    - **Cash-settled left to expire** (symbol in `cash_settled_symbols` — SPX/XSP/NDX/RUT): do **not** force-close these at `force_close_time`. Any side not already stopped is left to expire and settles in cash at the `expiration_settlement_time` (16:00 ET) close — an OTM short expires worthless (full credit retained); an ITM short settles for its intrinsic value, capped at the wing width. Record the settled outcome as `--status expired --exit_reason expired_settlement` (from the broker's realized settlement, reconciled the next session), with no closing fees. There is no assignment risk, so no critical escalation.

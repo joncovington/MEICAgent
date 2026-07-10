@@ -35,6 +35,27 @@ _RISK_PROFILES_PATH = os.path.join(_REPO_ROOT, "config.risk.json")
 _CONFIG_PATH = os.path.join(_REPO_ROOT, "config.json")
 _DB_PY = os.path.join(_HERE, "db.py")
 
+# Shared market calendar from the cherrypit-core submodule (src/_core). Bootstrap it onto sys.path so
+# this pure engine is importable standalone (tests, subprocess) with no install — mirrors the
+# credentials.py bootstrap. The calendar computes NYSE holidays / quarterly + triple-witching expiries
+# from rules (no hand-maintained per-year config lists, and no drift like the old 2026-06-18 bug).
+_CORE = os.path.join(_HERE, "_core")
+if os.path.isdir(_CORE) and _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
+from datetime import date as _date  # noqa: E402
+from cherrypit import calendar as _cal  # noqa: E402
+
+
+def _is_event_day(today, predicate) -> bool:
+    """Gate on a 'YYYY-MM-DD' snapshot date string (or None) via a cherrypit.calendar predicate."""
+    if not today:
+        return False
+    try:
+        d = _date.fromisoformat(today)
+    except (ValueError, TypeError):
+        return False
+    return predicate(d)
+
 ALL_PROFILE_NAMES = ["conservative", "moderate", "aggressive", "very-aggressive"]
 
 
@@ -190,8 +211,8 @@ def evaluate_entry(snapshot: dict, params: dict, open_ics: list,
 
     # Quarterly / triple-witching hard stops
     today = snapshot.get("date")
-    is_quarterly = today in params.get("quarterly_expiry_dates_2026", [])
-    is_witching = today in params.get("triple_witching_dates_2026", [])
+    is_quarterly = _is_event_day(today, _cal.is_quarterly_expiry)
+    is_witching = _is_event_day(today, _cal.is_triple_witching)
     if is_quarterly or is_witching:
         if snapshot.get("session_quality") == "open_volatile":
             return False, "quarterly_open_volatile_skip", None
@@ -199,7 +220,7 @@ def evaluate_entry(snapshot: dict, params: dict, open_ics: list,
             return False, "triple_witching_no_new_entries", None
 
     # FOMC blackout
-    if today in params.get("fomc_dates_2026", []):
+    if _is_event_day(today, _cal.is_fomc_day):
         blackout_start = _time_to_minutes(params.get("fomc_blackout_start", "13:30"))
         blackout_end = _time_to_minutes(params.get("fomc_blackout_end", "14:30"))
         if now_min >= blackout_start and now_min < blackout_end:
@@ -381,12 +402,12 @@ def force_close_active(snapshot: dict, base_config: dict, is_cash_settled: bool)
     today = snapshot.get("date")
 
     # FOMC blackout — all symbols, earliest trigger of the day
-    if today in base_config.get("fomc_dates_2026", []) and \
+    if _is_event_day(today, _cal.is_fomc_day) and \
             now_min >= _time_to_minutes(base_config.get("fomc_blackout_start", "13:30")):
         return True, "force_close_fomc"
     # Triple-witching / quarterly expiry — all symbols, 14:00 ET
-    if (today in base_config.get("triple_witching_dates_2026", []) or
-            today in base_config.get("quarterly_expiry_dates_2026", [])) and now_min >= _time_to_minutes("14:00"):
+    if (_is_event_day(today, _cal.is_triple_witching) or
+            _is_event_day(today, _cal.is_quarterly_expiry)) and now_min >= _time_to_minutes("14:00"):
         return True, "force_close_expiry_event"
     # Non-cash-settled symbols (QQQ/IWM/equities/futures) are closed before the bell to avoid
     # physical assignment — first at the earlier physical deadline, then a 15:45 backstop.

@@ -1118,6 +1118,24 @@ async def cmd_close_position(args) -> dict:
 # Stream commands (sync — no async needed)
 # ---------------------------------------------------------------------------
 
+def cmd_get_calendar(args) -> dict:
+    """Shared market calendar for a year (single source of truth from cherrypit.calendar):
+    NYSE holidays, FOMC days, quarterly + triple-witching expiries. Pure computation, no broker."""
+    import datetime as _dt
+    from cherrypit import calendar as _cal
+    year = args.year or _dt.date.today().year
+    iso = lambda ds: [d.isoformat() for d in ds]
+    return {
+        "ok": True,
+        "year": year,
+        "nyse_holidays": iso(sorted(_cal.nyse_holidays(year))),
+        "fomc_dates": iso(_cal.fomc_dates(year)),
+        "fomc_year_known": _cal.fomc_year_known(year),
+        "quarterly_expiry_dates": iso(_cal.quarterly_expiry_dates(year)),
+        "triple_witching_dates": iso(_cal.triple_witching_dates(year)),
+    }
+
+
 def cmd_secrets_status(_args) -> dict:
     from credentials import secrets_status
     status = secrets_status()
@@ -1502,6 +1520,9 @@ def main():
 
     sub.add_parser("secrets_status")
 
+    p_cal = sub.add_parser("get_calendar")
+    p_cal.add_argument("--year", type=int, default=None, help="Calendar year (default: current year)")
+
     p_sec = sub.add_parser("secrets_set")
     p_sec.add_argument(
         "--keys", nargs="+", default=None,
@@ -1536,6 +1557,7 @@ def main():
         "secrets_set":    cmd_secrets_set,
         "stream_status":  cmd_stream_status,
         "get_orb_range":  cmd_get_orb_range,
+        "get_calendar":   cmd_get_calendar,
     }
     if args.command in sync_dispatch:
         _out(sync_dispatch[args.command](args))

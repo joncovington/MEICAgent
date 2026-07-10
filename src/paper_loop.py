@@ -56,7 +56,8 @@ _TT = [sys.executable, str(_ROOT / "src" / "tt.py")]
 _DB = [sys.executable, str(_ROOT / "src" / "db.py"), "--db", _PAPER_DB]
 
 sys.path.insert(0, str(_ROOT / "src"))
-import paper  # noqa: E402
+import paper  # noqa: E402  (also bootstraps src/_core onto sys.path for cherrypit)
+from cherrypit import calendar as _cal  # noqa: E402  (shared NYSE trading-day calendar)
 
 logger = logging.getLogger("paper_loop")
 _stop = False
@@ -457,10 +458,8 @@ def run_iteration(cfg, force=False):
 # ---------------------------------------------------------------------------
 
 def _is_trading_time(now, cfg):
-    if now.weekday() >= 5:
-        return False
-    holidays = cfg.get(f"nyse_holidays_{now.year}", [])
-    if now.strftime("%Y-%m-%d") in holidays:
+    # Weekend + NYSE-holiday gate via the shared calendar (cfg kept for signature compatibility).
+    if not _cal.is_trading_day(now.date()):
         return False
     mins = now.hour * 60 + now.minute
     # Runs 09:30 through 16:05 - the extra 5 min past the 16:00 close lets the settlement pass

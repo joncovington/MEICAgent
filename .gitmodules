@@ -1,0 +1,3 @@
+[submodule "src/_core"]
+	path = src/_core
+	url = https://github.com/joncovington/cherrypit-core.git

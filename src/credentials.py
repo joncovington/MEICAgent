@@ -1,75 +1,61 @@
-"""Keyring-backed credential storage for tastytrade OAuth."""
+"""Keyring-backed credential storage for tastytrade OAuth.
+
+Thin shim over cherrypit-core's shared ``CredentialStore`` (see ``cherrypit.auth``). The keyring logic
+now lives in the shared core so all suite modules behave identically; this module only supplies MEIC's
+parameters and re-exports the module-level API existing call sites already import, so nothing else
+changes. MEIC keeps its read-only fallback to the pre-rename ``tastytrade-mcp`` service so credentials
+stored before the rename keep working (never written to going forward).
+"""
 
 from __future__ import annotations
 
-import keyring
-import keyring.errors
+# Make the cherrypit-core submodule (src/_core) importable without an install, so a fresh
+# `git clone --recursive` works out of the box. credentials.py is imported before any other code
+# needs `cherrypit` (session.py imports it first), so this one bootstrap covers the whole process.
+import sys as _sys
+from pathlib import Path as _Path
+
+_CORE = _Path(__file__).resolve().parent / "_core"
+if _CORE.is_dir() and str(_CORE) not in _sys.path:
+    _sys.path.insert(0, str(_CORE))
+
+from cherrypit.auth import (
+    ACCOUNT_NUMBER,
+    ALL_SECRETS,
+    CLIENT_SECRET,
+    REFRESH_TOKEN,
+    REQUIRED_SECRETS,
+    CredentialError,
+    CredentialStore,
+)
 
 SERVICE_NAME = "meicagent"
-_LEGACY_SERVICE_NAME = "tastytrade-mcp"  # read-only fallback for credentials stored before the rename
+_LEGACY_SERVICE_NAME = "tastytrade-mcp"  # read-only fallback for pre-rename credentials
 
-CLIENT_SECRET = "client_secret"
-REFRESH_TOKEN = "refresh_token"
-ACCOUNT_NUMBER = "account_number"
+# The single store instance for this module; session.py builds its SessionManager from it.
+store = CredentialStore(SERVICE_NAME, legacy_service_names=(_LEGACY_SERVICE_NAME,))
 
-REQUIRED_SECRETS = (CLIENT_SECRET, REFRESH_TOKEN)
-ALL_SECRETS = (CLIENT_SECRET, REFRESH_TOKEN, ACCOUNT_NUMBER)
+get_secret = store.get_secret
+set_secret = store.set_secret
+delete_secret = store.delete_secret
+secrets_present = store.secrets_present
+missing_secrets = store.missing_secrets
+secrets_status = store.secrets_status
 
-_PREFIX = "production"
-
-
-class CredentialError(RuntimeError):
-    pass
-
-
-def _entry(key: str) -> str:
-    return f"{_PREFIX}:{key}"
-
-
-def get_secret(key: str) -> str | None:
-    try:
-        value = keyring.get_password(SERVICE_NAME, _entry(key))
-    except keyring.errors.NoKeyringError as exc:
-        raise CredentialError("No keyring backend available.") from exc
-    except keyring.errors.KeyringError as exc:
-        raise CredentialError(f"Keyring read failed: {exc}") from exc
-    if value is not None:
-        return value
-    # Fall back to the pre-rename service name so existing stored credentials
-    # keep working without forcing a re-entry via secrets_set. Never written
-    # to going forward — set_secret only writes under SERVICE_NAME.
-    try:
-        return keyring.get_password(_LEGACY_SERVICE_NAME, _entry(key))
-    except keyring.errors.KeyringError:
-        return None
-
-
-def secrets_present() -> bool:
-    return all(get_secret(k) for k in REQUIRED_SECRETS)
-
-
-def missing_secrets() -> list[str]:
-    return [k for k in REQUIRED_SECRETS if not get_secret(k)]
-
-
-def set_secret(key: str, value: str) -> None:
-    try:
-        keyring.set_password(SERVICE_NAME, _entry(key), value)
-    except keyring.errors.NoKeyringError as exc:
-        raise CredentialError("No keyring backend available.") from exc
-    except keyring.errors.KeyringError as exc:
-        raise CredentialError(f"Keyring write failed: {exc}") from exc
-
-
-def delete_secret(key: str) -> None:
-    try:
-        keyring.delete_password(SERVICE_NAME, _entry(key))
-    except keyring.errors.PasswordDeleteError:
-        pass  # already absent
-    except keyring.errors.KeyringError as exc:
-        raise CredentialError(f"Keyring delete failed: {exc}") from exc
-
-
-def secrets_status() -> dict[str, bool]:
-    """Return {key: is_set} for all known secrets."""
-    return {k: bool(get_secret(k)) for k in ALL_SECRETS}
+__all__ = [
+    "CredentialError",
+    "CredentialStore",
+    "store",
+    "SERVICE_NAME",
+    "CLIENT_SECRET",
+    "REFRESH_TOKEN",
+    "ACCOUNT_NUMBER",
+    "REQUIRED_SECRETS",
+    "ALL_SECRETS",
+    "get_secret",
+    "set_secret",
+    "delete_secret",
+    "secrets_present",
+    "missing_secrets",
+    "secrets_status",
+]

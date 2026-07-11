@@ -416,12 +416,7 @@ def cmd_get_range_summary(args):
     rows = _rows_dicts(conn, where, params)
     conn.close()
 
-    groups: dict[str, list[dict]] = {}
-    for r in rows:
-        key = _profiles.attribution_tag(r["risk_profile"])
-        groups.setdefault(key, []).append(r)
-
-    profiles = {key: _range_stats_for_rows(group_rows) for key, group_rows in groups.items()}
+    profiles = _profiles.compare_profiles(rows, tag_key="risk_profile", summarize=_range_stats_for_rows)
 
     _out({
         "ok": True,

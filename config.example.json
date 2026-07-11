@@ -54,10 +54,10 @@
   "pre_submit_requote_threshold": 0.03,
 
   "credit_and_fee_floors_header": "===== Credit & Fee Floors =====",
-  "min_credit_pct_of_width": 0.20,
-  "_min_credit_pct_of_width_note": "Minimum credit as fraction of wing width; reject entries below this (e.g. 2-wide must collect >= $0.40).",
+  "min_credit_pct_of_width": 0.15,
+  "_min_credit_pct_of_width_note": "Minimum credit as fraction of wing width; reject entries below this (e.g. 2-wide must collect >= $0.30).",
   "low_iv_credit_floor_iv_rank_max": 0.35,
-  "low_iv_min_credit_pct_of_width": 0.15,
+  "low_iv_min_credit_pct_of_width": 0.10,
   "_low_iv_note": "When IV rank is >= min_iv_rank but <= low_iv_credit_floor_iv_rank_max, the credit floor relaxes to low_iv_min_credit_pct_of_width instead of min_credit_pct_of_width.",
   "_min_net_credit_after_fees_note": "The fee-adjusted floor no longer uses a flat dollar constant (retired 2026-07-06). It now requires (ic_natural_bid * dollar_multiplier) - est_fee_per_contract to clear the same applicable pct-of-width floor above, converted to dollars. The old standalone min_credit absolute-dollar-per-symbol floor was also retired as redundant once this fee check became width/IV-aware.",
   "fee_estimate_lookback_trades": 20,

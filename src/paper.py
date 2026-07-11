@@ -45,6 +45,7 @@ if os.path.isdir(_CORE) and _CORE not in sys.path:
 from datetime import date as _date  # noqa: E402
 
 from cherrypit import calendar as _cal  # noqa: E402
+from cherrypit import fees as _fees  # noqa: E402
 from cherrypit import profiles as _profiles  # noqa: E402
 
 
@@ -62,63 +63,30 @@ ALL_PROFILE_NAMES = ["conservative", "moderate", "aggressive", "very-aggressive"
 
 
 # ---------------------------------------------------------------------------
-# tastytrade fee schedule (Broad-Based Index Options; see CLAUDE.md
-# fee_estimate_fallback_per_contract for the same figures documented in config)
+# tastytrade fee schedule — one home in cherrypit.fees (src/_core). The schedule, constants, and
+# per-symbol broad-based index exchange fee live in the shared module (also used by db.py's live
+# fee estimate and, in equity form, by EarningsAgent). These thin wrappers keep MEIC's paper call
+# sites + tests stable and pass ndigits=4 so paper fees keep their exact sub-cent precision (2dp
+# rounding would break fee linearity across quantity). See cherrypit.fees.
 # ---------------------------------------------------------------------------
-
-_EXCHANGE_INDEX_FEE = {
-    "SPX": 0.60,
-    "XSP": 0.00,   # under 10 contracts/leg
-    "NDX": 0.25,
-    "RUT": 0.18,
-}
-_OPEN_COMMISSION_PER_CONTRACT = 1.00
-_CLEARING_PER_CONTRACT = 0.10
-_ORF_PER_CONTRACT = 0.02
-_FINRA_TAF_PER_CONTRACT = 0.00329  # sell legs only
-
-
-def _tt_fees(symbol: str, quantity: int, action: str, sell_legs: int, total_legs: int = 4) -> float:
-    """Exact tastytrade fee stack for one IC action, in dollars (not per-contract).
-
-    action:
-      "open"   — all 4 legs open; commission + clearing + ORF + exchange fee per contract
-                 per leg, plus FINRA TAF on the `sell_legs` (short put + short call = 2).
-      "close"  — an active close (a per-side stop or a force-close); no commission,
-                 but clearing/ORF/exchange fee/TAF still apply on the legs being closed.
-      "expire" — expired OTM; no fees at all (no closing transaction occurs).
-    total_legs lets a per-side stop (2 legs: one short + its long wing) fee correctly
-    instead of assuming all 4.
-    """
-    symbol = symbol.upper()
-    exch = _EXCHANGE_INDEX_FEE.get(symbol, 0.0)
-    if action == "expire":
-        return 0.0
-    per_contract = _CLEARING_PER_CONTRACT + _ORF_PER_CONTRACT + exch
-    if action == "open":
-        per_contract += _OPEN_COMMISSION_PER_CONTRACT
-    fee = per_contract * total_legs * quantity
-    fee += _FINRA_TAF_PER_CONTRACT * sell_legs * quantity
-    return round(fee, 4)
-
 
 def open_fees(symbol: str, quantity: int = 1) -> float:
     """Fee to open a full 4-leg IC (2 sell legs: short put + short call)."""
-    return _tt_fees(symbol, quantity, action="open", sell_legs=2, total_legs=4)
+    return _fees.ic_open_fee(symbol, quantity, legs=4, sell_legs=2, ndigits=4)
 
 
 def close_fees_full_ic(symbol: str, quantity: int = 1) -> float:
     """Fee to actively close a full 4-leg IC (2 sell legs: BTC short put + short call)."""
-    return _tt_fees(symbol, quantity, action="close", sell_legs=2, total_legs=4)
+    return _fees.ic_close_fee(symbol, quantity, legs=4, sell_legs=2, ndigits=4)
 
 
 def close_fees_one_side(symbol: str, quantity: int = 1) -> float:
     """Fee to actively close one side (2 legs: 1 short being bought back = 1 sell-side TAF)."""
-    return _tt_fees(symbol, quantity, action="close", sell_legs=1, total_legs=2)
+    return _fees.ic_close_fee(symbol, quantity, legs=2, sell_legs=1, ndigits=4)
 
 
 def expire_fees() -> float:
-    return 0.0
+    return _fees.ic_expire_fee()
 
 
 # ---------------------------------------------------------------------------

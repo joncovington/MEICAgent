@@ -210,7 +210,7 @@ def test_profile_gate_values_are_valid_types(sample_risk_profiles):
 
 def test_profile_gate_values_in_reasonable_ranges(sample_risk_profiles):
     """Verify gate values are in reasonable ranges (sanity check)."""
-    for profile_name, profile in sample_risk_profiles["profiles"].items():
+    for profile in sample_risk_profiles["profiles"].values():
         # IV rank should be 0.0-1.0
         if "min_iv_rank" in profile:
             assert 0.0 <= profile["min_iv_rank"] <= 1.0

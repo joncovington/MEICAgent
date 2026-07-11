@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 try:
     import pytz
@@ -16,9 +16,9 @@ try:
         return _now_et().strftime("%Y-%m-%d")
 except ImportError:
     def _now_et():
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     def _today_et():
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return datetime.now(UTC).strftime("%Y-%m-%d")
 
 _DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "meic_trades.db")
 # MEIC_DB_PATH lets the paper-trading engine (src/paper.py) and its skills point every

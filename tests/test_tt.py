@@ -20,7 +20,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import tt
 
-
 _CACHE_DDL = """
 CREATE TABLE IF NOT EXISTS stream_chain (
     streamer_symbol   TEXT PRIMARY KEY,
@@ -496,8 +495,6 @@ def test_compute_gex_skips_entries_missing_oi_or_greeks():
 # --- cmd_get_orb_range ---------------------------------------------------------
 
 def test_cmd_get_orb_range_not_captured_yet(cache_db, monkeypatch):
-    import pytz
-    et_today = __import__("datetime").datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
     args = type("Args", (), {"symbol": "xsp"})()
     result = tt.cmd_get_orb_range(args)
     assert result["ok"] is False

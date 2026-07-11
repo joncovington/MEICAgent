@@ -5,27 +5,22 @@ and call functions directly.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import sqlite3
 import sys
-import time
 import tempfile
+import time
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import streamer as _streamer
 from streamer import (
     _DDL,
+    _REST_TTL,
     _read_rest_cache,
     _write_rest_cache,
-    _REST_TTL,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,7 +38,7 @@ def _make_db() -> sqlite3.Connection:
     return conn
 
 
-def _handler(db_path: str) -> "_streamer._ApiHandler":
+def _handler(db_path: str) -> _streamer._ApiHandler:
     """Return a handler instance whose _db() opens the given file DB."""
     h = object.__new__(_streamer._ApiHandler)
     # Patch _db() to use our temp file

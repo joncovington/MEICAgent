@@ -32,7 +32,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -43,7 +43,7 @@ try:
         return datetime.now(_ET)
 except ImportError:
     def _now_et():
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 _ROOT = Path(__file__).resolve().parent.parent
 _PID_FILE = _ROOT / "data" / "paper_loop.pid"
@@ -56,8 +56,9 @@ _TT = [sys.executable, str(_ROOT / "src" / "tt.py")]
 _DB = [sys.executable, str(_ROOT / "src" / "db.py"), "--db", _PAPER_DB]
 
 sys.path.insert(0, str(_ROOT / "src"))
-import paper  # noqa: E402  (also bootstraps src/_core onto sys.path for cherrypit)
 from cherrypit import calendar as _cal  # noqa: E402  (shared NYSE trading-day calendar)
+
+import paper  # noqa: E402  (also bootstraps src/_core onto sys.path for cherrypit)
 
 logger = logging.getLogger("paper_loop")
 _stop = False
@@ -193,7 +194,8 @@ def _fetch_overview(symbol):
         for k in ("close", "last", "mark"):
             if m.get(k) is not None:
                 try:
-                    price = float(m[k]); break
+                    price = float(m[k])
+                    break
                 except (TypeError, ValueError):
                     pass
         ivr = m.get("implied_volatility_index_rank")
@@ -350,7 +352,7 @@ def _write_eod_report(day):
     L.append(f"- Net P&L (net of fees): **{_money(round(net_total, 2))}**")
     L.append(f"- Still open at report time: {open_n}")
     if by_symbol:
-        L.append(f"- By symbol: " + ", ".join(f"{s} {_money(round(v, 2))}" for s, v in sorted(by_symbol.items())))
+        L.append("- By symbol: " + ", ".join(f"{s} {_money(round(v, 2))}" for s, v in sorted(by_symbol.items())))
     L.append("")
 
     L.append("## Per profile")
@@ -495,7 +497,7 @@ def _running_pid():
         try:
             os.kill(pid, 0)
             alive = True
-        except (PermissionError,):
+        except PermissionError:
             alive = True
         except (OSError, SystemError):
             alive = False
@@ -520,19 +522,19 @@ def _cmd_status():
         "scheduled_task": _task_installed(),  # the recommended --install-task automation
         "open_positions": _open_count(),
     }
-    _emit((info))
+    _emit(info)
 
 
 def _cmd_stop():
     pid = _running_pid()
     if pid is None:
-        _emit(({"ok": False, "error": "not running"}))
+        _emit({"ok": False, "error": "not running"})
         return
     try:
         os.kill(pid, signal.SIGTERM)
-        _emit(({"ok": True, "signal": "SIGTERM", "pid": pid}))
+        _emit({"ok": True, "signal": "SIGTERM", "pid": pid})
     except Exception as exc:
-        _emit(({"ok": False, "error": str(exc)}))
+        _emit({"ok": False, "error": str(exc)})
 
 
 def _spawn_detached():
@@ -543,7 +545,7 @@ def _spawn_detached():
     explicitly with --stop."""
     existing = _running_pid()
     if existing is not None:
-        _emit(({"ok": False, "error": f"Paper loop already running (pid {existing})."}))
+        _emit({"ok": False, "error": f"Paper loop already running (pid {existing})."})
         return
     kwargs = {}
     if os.name == "nt":
@@ -557,8 +559,8 @@ def _spawn_detached():
                      stderr=subprocess.DEVNULL, close_fds=True, cwd=str(_ROOT), **kwargs)
     time.sleep(2)
     pid = _running_pid()
-    _emit(({"ok": pid is not None, "pid": pid,
-                      "detail": "daemon spawned" if pid else "spawn did not register a PID yet"}))
+    _emit({"ok": pid is not None, "pid": pid,
+                      "detail": "daemon spawned" if pid else "spawn did not register a PID yet"})
 
 
 def _loop():
@@ -642,8 +644,8 @@ def _release_once_lock():
 
 def _install_task():
     if os.name != "nt":
-        _emit(({"ok": False, "error": "scheduled-task install is Windows-only; on "
-                          "other OSes run `python src/paper_loop.py` in a terminal or via cron"}))
+        _emit({"ok": False, "error": "scheduled-task install is Windows-only; on "
+                          "other OSes run `python src/paper_loop.py` in a terminal or via cron"})
         return
     # pythonw.exe = no console window, so the every-2-min --once run is truly headless.
     tr = f'"{_pythonw()}" "{os.path.abspath(__file__)}" --once'
@@ -654,17 +656,17 @@ def _install_task():
     # Fire one run immediately so positions are managed without waiting for the first tick.
     if ok:
         subprocess.run(["schtasks", "/Run", "/TN", _TASK_NAME], capture_output=True, text=True)
-    _emit(({"ok": ok, "task": _TASK_NAME, "cadence": "every 2 min",
-                      "detail": (r.stdout or r.stderr).strip()}))
+    _emit({"ok": ok, "task": _TASK_NAME, "cadence": "every 2 min",
+                      "detail": (r.stdout or r.stderr).strip()})
 
 
 def _uninstall_task():
     if os.name != "nt":
-        _emit(({"ok": False, "error": "Windows-only"}))
+        _emit({"ok": False, "error": "Windows-only"})
         return
     subprocess.run(["schtasks", "/End", "/TN", _TASK_NAME], capture_output=True, text=True)
     r = subprocess.run(["schtasks", "/Delete", "/TN", _TASK_NAME, "/F"], capture_output=True, text=True)
-    _emit(({"ok": r.returncode == 0, "detail": (r.stdout or r.stderr).strip()}))
+    _emit({"ok": r.returncode == 0, "detail": (r.stdout or r.stderr).strip()})
 
 
 def main():
@@ -712,7 +714,7 @@ def main():
     if args.once:
         _setup_logging(console=True)
         if not _acquire_once_lock():
-            _emit(({"ok": True, "skipped": "another --once is already running"}))
+            _emit({"ok": True, "skipped": "another --once is already running"})
             return
         try:
             summary = run_iteration(_load_config(), force=args.force)
@@ -725,8 +727,8 @@ def main():
     # in a terminal, or the detached child spawned by --start.
     existing = _running_pid()
     if existing is not None:
-        _emit(({"ok": False, "error": f"Paper loop already running (pid {existing}). "
-                                                 f"Run 'python src/paper_loop.py --stop' first."}))
+        _emit({"ok": False, "error": f"Paper loop already running (pid {existing}). "
+                                                 f"Run 'python src/paper_loop.py --stop' first."})
         raise SystemExit(1)
     _setup_logging(console=False)  # daemon: file-only, no fragile stdout dependency
     _loop()

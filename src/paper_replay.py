@@ -27,12 +27,12 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 
 import keyring
 import keyring.errors
-import urllib.request
-import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paper  # noqa: E402
@@ -67,9 +67,10 @@ def _api_get(path: str, timeout: float = 15.0) -> dict:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ReplayError(f"0DTESPX API {path} -> HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')}")
+        raise ReplayError(
+            f"0DTESPX API {path} -> HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')}") from exc
     except urllib.error.URLError as exc:
-        raise ReplayError(f"0DTESPX API {path} unreachable: {exc.reason}")
+        raise ReplayError(f"0DTESPX API {path} unreachable: {exc.reason}") from exc
 
 
 def _cache_path(date: str) -> str:
@@ -251,7 +252,7 @@ def main():
     p_tok = sub.add_parser("set_token", help="Store the 0DTESPX bearer token in the OS keyring")
     p_tok.add_argument("--token", required=True)
 
-    p_sessions = sub.add_parser("sessions", help="List available historical trading days")
+    sub.add_parser("sessions", help="List available historical trading days")
 
     p_run = sub.add_parser("run", help="Replay one historical SPX trading day")
     p_run.add_argument("--date", required=True, help="YYYY-MM-DD")

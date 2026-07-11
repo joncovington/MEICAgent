@@ -13,7 +13,7 @@ import threading
 import time
 import urllib.parse
 import webbrowser
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
@@ -37,16 +37,16 @@ try:
         return datetime.now(_ET).strftime("%Y-01-01")
 except ImportError:
     def _today() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return datetime.now(UTC).strftime("%Y-%m-%d")
     def _now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
     def _week_start() -> str:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
     def _month_start() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-01")
+        return datetime.now(UTC).strftime("%Y-%m-01")
     def _year_start() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-01-01")
+        return datetime.now(UTC).strftime("%Y-01-01")
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -176,9 +176,9 @@ def _stats_for_period(conn: sqlite3.Connection, start: str | None = None, end: s
         net_pnl += float(r.get("pnl") or 0)
         total_trades += 1
         trade_legs = legs.get(r["ic_order_id"], {})
-        w, l = _spread_wins_losses(r.get("status"), r.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
+        w, loss = _spread_wins_losses(r.get("status"), r.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
         wins += w
-        losses += l
+        losses += loss
     result = {
         "net_pnl":      round(net_pnl, 2),
         "total_trades": total_trades,
@@ -254,9 +254,9 @@ def _pnl_series(conn: sqlite3.Connection, granularity: str, symbol: str | None =
         if r.get("pnl") is not None:
             b["trade_pnls"].append(pnl)
         trade_legs = legs.get(r["ic_order_id"], {})
-        w, l = _spread_wins_losses(r.get("status"), r.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
+        w, loss = _spread_wins_losses(r.get("status"), r.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
         b["wins"] += w
-        b["losses"] += l
+        b["losses"] += loss
 
     series = sorted(buckets.values(), key=lambda b: b["period"])
     running = 0.0
@@ -430,7 +430,7 @@ def _build_log_data(n: int = 200) -> dict:
     if not os.path.exists(_LOG_PATH):
         return {"ok": True, "lines": [], "note": "Log file not found"}
     try:
-        with open(_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+        with open(_LOG_PATH, encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
         tail = all_lines[-n:] if len(all_lines) > n else all_lines
         lines = []
@@ -597,7 +597,7 @@ def _build_api_data(symbol: str | None = None, profile: str | None = None) -> di
     for t in raw_recent:
         trade_legs = recent_legs.get(t["ic_order_id"], {})
         put_s, call_s = _spread_statuses(t, trade_legs.get("put"), trade_legs.get("call"))
-        w, l = _spread_wins_losses(t.get("status"), t.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
+        w, loss = _spread_wins_losses(t.get("status"), t.get("pnl"), trade_legs.get("put"), trade_legs.get("call"))
         recent_trades.append({
             "trade_date":    t.get("trade_date"),
             "ic_order_id":   t.get("ic_order_id"),
@@ -618,7 +618,7 @@ def _build_api_data(symbol: str | None = None, profile: str | None = None) -> di
             "put_status":    put_s,
             "call_status":   call_s,
             "spread_wins":   w,
-            "spread_losses": l,
+            "spread_losses": loss,
         })
 
     profile_rows = _rows(conn,
@@ -769,7 +769,7 @@ def _market_open_close_ts() -> tuple[float, float]:
         open_dt = now.replace(hour=9, minute=30, second=0, microsecond=0)
         close_dt = now.replace(hour=16, minute=0, second=0, microsecond=0)
     except NameError:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         open_dt = now.replace(hour=13, minute=30, second=0, microsecond=0)
         close_dt = now.replace(hour=20, minute=0, second=0, microsecond=0)
     return open_dt.timestamp(), close_dt.timestamp()
@@ -966,7 +966,6 @@ def _build_gex_data(symbol: str | None = None) -> dict:
             vol = int(opt.get("average_daily_volume") or 0)
 
         g = greeks.get(sym, {})
-        q = quotes.get(sym, {})
         gamma = float(g.get("gamma") or 0)
         raw_iv = float(g.get("iv") or 0)
         # cache stores raw decimal (0.20); REST path stores already-pct (20.0)
@@ -994,11 +993,19 @@ def _build_gex_data(symbol: str | None = None) -> dict:
             }
         d = strikes[strike]
         if "C" in otype:
-            d["call_gamma"] = gamma; d["call_iv"] = round(iv, 2)
-            d["call_oi"] = oi;       d["call_vol"] = vol; d["call_gex"] = gex; d["call_gex_vol"] = gex_vol
+            d["call_gamma"] = gamma
+            d["call_iv"] = round(iv, 2)
+            d["call_oi"] = oi
+            d["call_vol"] = vol
+            d["call_gex"] = gex
+            d["call_gex_vol"] = gex_vol
         elif "P" in otype:
-            d["put_gamma"]  = gamma; d["put_iv"]  = round(iv, 2)
-            d["put_oi"]  = oi;       d["put_vol"]  = vol; d["put_gex"]  = gex; d["put_gex_vol"]  = gex_vol
+            d["put_gamma"] = gamma
+            d["put_iv"] = round(iv, 2)
+            d["put_oi"] = oi
+            d["put_vol"] = vol
+            d["put_gex"] = gex
+            d["put_gex_vol"] = gex_vol
 
     series = []
     for strike in sorted(strikes):

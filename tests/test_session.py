@@ -14,8 +14,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-import session
 from cherrypit.auth import SessionManager
+
+import session
 
 
 @pytest.fixture(autouse=True)

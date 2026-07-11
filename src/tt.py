@@ -37,10 +37,11 @@ from typing import Any
 # Allow running as `python src/tt.py` from any working directory.
 sys.path.insert(0, os.path.dirname(__file__))
 
+from cherrypit import dxfeed as _dx
+
 import credentials as _creds
 import gex_math
 from session import get_session
-from cherrypit import dxfeed as _dx
 
 # ---------------------------------------------------------------------------
 # Logging — each invocation is a short-lived subprocess whose only normal
@@ -89,9 +90,8 @@ def _try_streamer_http(command: str, args_dict: dict) -> dict | None:
     per-call latency bump.
     """
     global _last_streamer_http_error
-    import socket
-    import urllib.request
     import urllib.error
+    import urllib.request
     body = json.dumps({"command": command, "args": args_dict}).encode()
     try:
         req = urllib.request.Request(
@@ -108,7 +108,7 @@ def _try_streamer_http(command: str, args_dict: dict) -> dict | None:
         # Streamer daemon simply isn't running — normal/expected, not worth a warning.
         _last_streamer_http_error = f"streamer not reachable: {exc}"
         return None
-    except (socket.timeout, TimeoutError) as exc:
+    except TimeoutError as exc:
         # Daemon is running but didn't respond within 5s — the interesting case:
         # the same failure shape as the 2026-07-01 session/event-loop stall.
         _last_streamer_http_error = f"streamer HTTP timeout: {exc}"
@@ -274,7 +274,7 @@ class _CachedOption:
         try:
             return object.__getattribute__(self, "_data")[name]
         except KeyError:
-            raise AttributeError(name)
+            raise AttributeError(name) from None
 
     def model_dump(self, mode: str = "json") -> dict:
         return object.__getattribute__(self, "_data")
@@ -992,7 +992,7 @@ _ACTION_MAP = {
 
 
 def _build_order(spec: dict):
-    from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, Leg
+    from tastytrade.order import Leg, NewOrder, OrderAction, OrderTimeInForce, OrderType
 
     tif = OrderTimeInForce(str(spec.get("time_in_force", "Day")))
     otype = OrderType(str(spec.get("order_type", "Limit")))
@@ -1097,9 +1097,13 @@ def cmd_get_calendar(args) -> dict:
     """Shared market calendar for a year (single source of truth from cherrypit.calendar):
     NYSE holidays, FOMC days, quarterly + triple-witching expiries. Pure computation, no broker."""
     import datetime as _dt
+
     from cherrypit import calendar as _cal
     year = args.year or _dt.date.today().year
-    iso = lambda ds: [d.isoformat() for d in ds]
+
+    def iso(ds):
+        return [d.isoformat() for d in ds]
+
     return {
         "ok": True,
         "year": year,
@@ -1124,7 +1128,8 @@ def cmd_secrets_status(_args) -> dict:
 def cmd_secrets_set(args) -> dict:
     """Interactively prompt for and store credentials in the OS keyring."""
     import getpass
-    from credentials import ALL_SECRETS, REQUIRED_SECRETS, set_secret, get_secret
+
+    from credentials import ALL_SECRETS, REQUIRED_SECRETS, get_secret, set_secret
 
     label = {
         "client_secret":  "Client Secret",

@@ -59,7 +59,7 @@ def test_log_event_appends_multiple_entries(_tmp_log):
     notify._log_event_internal("INFO", "second")
     lines = _read_log_lines(_tmp_log)
     assert len(lines) == 2
-    assert [l["message"] for l in lines] == ["first", "second"]
+    assert [entry["message"] for entry in lines] == ["first", "second"]
 
 
 def test_cmd_log_event_parses_json_data(_tmp_log, capsys):

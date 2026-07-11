@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _ROOT = os.path.dirname(os.path.dirname(__file__))
 _LOG_DIR = os.path.join(_ROOT, "logs")
@@ -41,7 +41,7 @@ def _now_iso():
         from datetime import datetime as dt
         return dt.now(et).isoformat()
     except ImportError:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
 
 def _out(data):

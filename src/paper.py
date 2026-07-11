@@ -18,7 +18,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 try:
     import pytz
@@ -27,7 +27,7 @@ try:
         return datetime.now(_ET)
 except ImportError:
     def _now_et():
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.join(_HERE, "..")
@@ -43,6 +43,7 @@ _CORE = os.path.join(_HERE, "_core")
 if os.path.isdir(_CORE) and _CORE not in sys.path:
     sys.path.insert(0, _CORE)
 from datetime import date as _date  # noqa: E402
+
 from cherrypit import calendar as _cal  # noqa: E402
 
 
@@ -632,7 +633,6 @@ def _apply_exit_decision(trade: dict, decision: dict, symbol: str, db_path: str)
     action = decision["action"]
     now = str(_now_et())
     ic_order_id = trade["ic_order_id"]
-    net_credit = trade["net_credit"]
     mult = 100
 
     if action == "hold":
@@ -676,7 +676,6 @@ def _apply_exit_decision(trade: dict, decision: dict, symbol: str, db_path: str)
             _db(["record_leg_exit", "--ic_order_id", ic_order_id, "--side", "put",
                  "--status", "stopped", "--exit_time", now, "--exit_reason", "per_side_stop",
                  "--exit_price", str(decision["put_exit_price"]), "--pnl", str(put_pnl)], db_path)
-        remaining_open = not (action == "stop_both")
         updates["status"] = "stopped" if action == "stop_both" else "partial"
         _update_trade(ic_order_id, updates, db_path)
         # Accumulate realized pnl for stopped legs; final pnl reconciled when the other

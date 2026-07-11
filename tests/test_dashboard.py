@@ -9,15 +9,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import dashboard
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

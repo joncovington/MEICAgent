@@ -10,8 +10,9 @@ single loop (sharing one would silently hang awaits from the second loop). The `
 
 from __future__ import annotations
 
-import credentials
 from cherrypit.auth import SessionManager
+
+import credentials
 
 _manager = SessionManager(credentials.store, thread_local=True)
 

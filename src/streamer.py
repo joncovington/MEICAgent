@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 _ET = pytz.timezone("America/New_York")
 
-from session import get_session
+from session import get_session  # noqa: E402  # intentional: after the sys.path bootstrap above
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -284,7 +284,7 @@ _NOMINAL_WING_PRICE = 0.01  # fallback price for a long wing leg with no quote a
 # Shared state for the HTTP server thread
 _loop: asyncio.AbstractEventLoop | None = None           # DXLink event loop
 _rest_loop: asyncio.AbstractEventLoop | None = None      # dedicated REST loop
-_http_state: "_State | None" = None
+_http_state: _State | None = None
 
 # Default arg values for each command (mirrors argparse defaults in tt.py)
 _CMD_DEFAULTS: dict[str, dict] = {
@@ -344,7 +344,7 @@ _COMMIT_BATCH_INTERVAL_S = 0.5
 _COMMIT_BATCH_MAX_PENDING = 25
 
 
-def _maybe_commit(state: "_State") -> None:
+def _maybe_commit(state: _State) -> None:
     """Commit state.conn if enough writes or time have accumulated since the last commit."""
     state.pending_writes += 1
     now = time.time()
@@ -362,7 +362,7 @@ async def _run_stream(state: _State, symbols: list[str]) -> None:
     logger.info("Connecting DXLinkStreamer…")
 
     async with DXLinkStreamer(session) as streamer:
-        connected_at = datetime.now(timezone.utc).isoformat()
+        connected_at = datetime.now(UTC).isoformat()
         _upsert_status(
             state.conn,
             pid=os.getpid(),
@@ -459,7 +459,7 @@ async def _listen_trade(streamer, state: _State, Trade) -> None:
                  _f(event.day_volume), ts),
             )
             _maybe_commit(state)
-            state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            state.last_event_at = datetime.fromtimestamp(ts, tz=UTC).isoformat()
             _track_orb(state, event.event_symbol, _f(event.price), ts)
         except Exception as exc:
             logger.warning("Trade write error: %s", exc)
@@ -477,23 +477,23 @@ def _track_orb(state: _State, symbol: str, price: float | None, ts: float) -> No
     window_end = et_now.replace(hour=9, minute=35, second=0, microsecond=0)
     if window_start <= et_now < window_end:
         h = state.orb_high.get(symbol)
-        l = state.orb_low.get(symbol)
+        low = state.orb_low.get(symbol)
         state.orb_high[symbol] = price if h is None else max(h, price)
-        state.orb_low[symbol] = price if l is None else min(l, price)
+        state.orb_low[symbol] = price if low is None else min(low, price)
         return
     if et_now >= window_end and symbol not in state.orb_captured:
-        h, l = state.orb_high.get(symbol), state.orb_low.get(symbol)
-        if h is None or l is None:
+        h, low = state.orb_high.get(symbol), state.orb_low.get(symbol)
+        if h is None or low is None:
             return  # streamer wasn't running during the window today — nothing to persist
         try:
             state.conn.execute(
                 "INSERT INTO orb_ranges (symbol, trade_date, orb_high, orb_low, captured_at) "
                 "VALUES (?, ?, ?, ?, ?) ON CONFLICT(symbol, trade_date) DO NOTHING",
-                (symbol, et_now.strftime("%Y-%m-%d"), h, l, ts),
+                (symbol, et_now.strftime("%Y-%m-%d"), h, low, ts),
             )
             state.conn.commit()
             state.orb_captured.add(symbol)
-            logger.info("[%s] ORB range captured: high=%.2f low=%.2f", symbol, h, l)
+            logger.info("[%s] ORB range captured: high=%.2f low=%.2f", symbol, h, low)
         except Exception as exc:
             logger.warning("[%s] ORB persist error: %s", symbol, exc)
 
@@ -519,7 +519,7 @@ async def _listen_quote(streamer, state: _State, Quote) -> None:
                  _f(event.bid_size), _f(event.ask_size), ts),
             )
             _maybe_commit(state)
-            state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            state.last_event_at = datetime.fromtimestamp(ts, tz=UTC).isoformat()
         except Exception as exc:
             logger.warning("Quote write error: %s", exc)
 
@@ -544,7 +544,7 @@ async def _listen_greeks(streamer, state: _State, Greeks) -> None:
                  _f(event.volatility), _f(event.price), ts),
             )
             _maybe_commit(state)
-            state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            state.last_event_at = datetime.fromtimestamp(ts, tz=UTC).isoformat()
         except Exception as exc:
             logger.warning("Greeks write error: %s", exc)
 
@@ -567,7 +567,7 @@ async def _listen_summary(streamer, state: _State, Summary) -> None:
                 (event.event_symbol, int(oi), ts),
             )
             _maybe_commit(state)
-            state.last_event_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            state.last_event_at = datetime.fromtimestamp(ts, tz=UTC).isoformat()
         except Exception as exc:
             logger.warning("Summary write error: %s", exc)
 
@@ -1052,7 +1052,6 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
         sym = args.get("symbol", "").strip().upper()
         wing_width = int(args.get("wing_width", 5))
         short_delta = float(args.get("short_delta", 0.15))
-        around_price = args.get("around_price")
         now = time.time()
         conn = self._db()
         try:
@@ -1134,7 +1133,7 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
             lp = nearest_by_strike(puts, sp_strike - wing_width, exclude_idx=sp_idx) or puts[0]
 
             # Quotes for credit estimate
-            leg_syms = [l.get("streamer_symbol") for l in (sp, lp, sc, lc) if l.get("streamer_symbol")]
+            leg_syms = [leg.get("streamer_symbol") for leg in (sp, lp, sc, lc) if leg.get("streamer_symbol")]
             ph2 = ",".join("?" * len(leg_syms))
             quotes_map = {}
             stale_quotes_map = {}
@@ -1146,7 +1145,7 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
                 if (now - r["updated_at"]) < 10:
                     quotes_map[r["symbol"]] = r["mid"]
 
-            mids = [quotes_map.get(l.get("streamer_symbol")) for l in (sp, lp, sc, lc)]
+            mids = [quotes_map.get(leg.get("streamer_symbol")) for leg in (sp, lp, sc, lc)]
 
             # Long wing legs (bought for protection, not sold for credit) trade so rarely
             # a fresh quote often never arrives — fall back to the last-known price (even
@@ -1203,7 +1202,7 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
         pass  # suppress per-request access logs
 
 
-def _start_http_server(state: "_State") -> None:
+def _start_http_server(state: _State) -> None:
     global _http_state
     _http_state = state
     try:

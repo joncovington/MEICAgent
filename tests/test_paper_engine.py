@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import db
 import paper
 
-
 # ── Fee model ────────────────────────────────────────────────────────────────
 
 def test_open_fees_spx_matches_documented_fallback():

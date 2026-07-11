@@ -37,4 +37,5 @@ jobs:
         run: ruff check .
 
       - name: Test (pytest)
-        run: pytest
+        # `python -m pytest` (not bare `pytest`) puts the repo root on sys.path, matching local runs.
+        run: python -m pytest

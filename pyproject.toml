@@ -39,3 +39,11 @@ ignore = ["E501"]
 # The _core sys.path bootstrap deliberately runs before `import cherrypit` (see CUTOVER.md), so the
 # imports below it are not at top of file by design.
 "src/credentials.py" = ["E402"]
+
+[tool.hatch.build.targets.wheel]
+# Flat modules live under src/ and are imported top-level (pytest adds src to pythonpath); map the
+# src/ prefix away so an editable install exposes them the same way. Exclude the _core submodule and
+# tests from the built package.
+only-include = ["src"]
+sources = ["src"]
+exclude = ["src/_core"]

@@ -30,7 +30,6 @@ import sqlite3
 import sys
 import time
 from datetime import date, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -952,39 +951,11 @@ async def cmd_get_working_orders(args) -> dict:
 # Order tools (gated behind live trading)
 # ---------------------------------------------------------------------------
 
-_ACTION_MAP = {
-    "buy to open": "BUY_TO_OPEN",
-    "sell to open": "SELL_TO_OPEN",
-    "buy to close": "BUY_TO_CLOSE",
-    "sell to close": "SELL_TO_CLOSE",
-}
-
-
 def _build_order(spec: dict):
-    from tastytrade.order import Leg, NewOrder, OrderAction, OrderTimeInForce, OrderType
-
-    tif = OrderTimeInForce(str(spec.get("time_in_force", "Day")))
-    otype = OrderType(str(spec.get("order_type", "Limit")))
-    legs = []
-    for leg in spec.get("legs", []):
-        action = OrderAction[_ACTION_MAP[str(leg["action"]).strip().lower()]]
-        legs.append(Leg(
-            instrument_type=leg["instrument_type"],
-            symbol=leg["symbol"],
-            action=action,
-            quantity=Decimal(str(leg["quantity"])),
-        ))
-    kwargs: dict = {"time_in_force": tif, "order_type": otype, "legs": legs}
-    if spec.get("price") is not None:
-        price = Decimal(str(spec["price"]))
-        effect = spec.get("price_effect")
-        if effect is not None:
-            magnitude = abs(price)
-            price = -magnitude if str(effect).strip().lower() == "credit" else magnitude
-        kwargs["price"] = price
-    if spec.get("stop_trigger") is not None:
-        kwargs["stop_trigger"] = Decimal(str(spec["stop_trigger"]))
-    return NewOrder(**kwargs)
+    # Delegates to cherrypit.broker (src/_core): pure order construction (dict spec -> NewOrder),
+    # no submission. Handles the optional stop_trigger. cmd_execute_trade below still owns the
+    # dry-run/live place_order call.
+    return _broker.build_order(spec)
 
 
 async def cmd_execute_trade(args) -> dict:

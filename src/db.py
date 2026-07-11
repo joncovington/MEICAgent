@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_core"))
 
 from cherrypit import db as _db
+from cherrypit import profiles as _profiles
 
 try:
     import pytz
@@ -417,7 +418,7 @@ def cmd_get_range_summary(args):
 
     groups: dict[str, list[dict]] = {}
     for r in rows:
-        key = r["risk_profile"] or "unassigned"
+        key = _profiles.attribution_tag(r["risk_profile"])
         groups.setdefault(key, []).append(r)
 
     profiles = {key: _range_stats_for_rows(group_rows) for key, group_rows in groups.items()}

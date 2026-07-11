@@ -10,9 +10,19 @@ single loop (sharing one would silently hang awaits from the second loop). The `
 
 from __future__ import annotations
 
-from cherrypick.core.auth import SessionManager
+import os as _os
+import sys as _sys
 
-import credentials
+# Bootstrap the cherrypick-core submodule (src/_core) onto sys.path *before* the cherrypick.core import
+# — import-sorting puts it ahead of the local `import credentials` (which also bootstraps _core), and
+# importers like streamer.py only add src/, not src/_core. Mirrors the tt.py / paper.py bootstrap.
+_CORE = _os.path.join(_os.path.dirname(__file__), "_core")
+if _os.path.isdir(_CORE) and _CORE not in _sys.path:
+    _sys.path.insert(0, _CORE)
+
+from cherrypick.core.auth import SessionManager  # noqa: E402
+
+import credentials  # noqa: E402
 
 _manager = SessionManager(credentials.store, thread_local=True)
 

@@ -56,6 +56,12 @@ _TT = [sys.executable, str(_ROOT / "src" / "tt.py")]
 _DB = [sys.executable, str(_ROOT / "src" / "db.py"), "--db", _PAPER_DB]
 
 sys.path.insert(0, str(_ROOT / "src"))
+# Bootstrap the cherrypick-core submodule (src/_core) onto sys.path *before* importing cherrypick.core
+# — the calendar import below runs before `import paper` (which also bootstraps it), so this daemon
+# would otherwise ModuleNotFoundError standalone. Mirrors the paper.py / credentials.py bootstrap.
+_CORE = str(_ROOT / "src" / "_core")
+if os.path.isdir(_CORE) and _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
 from cherrypick.core import calendar as _cal  # noqa: E402  (shared NYSE trading-day calendar)
 
 import paper  # noqa: E402  (also bootstraps src/_core onto sys.path for cherrypick.core)

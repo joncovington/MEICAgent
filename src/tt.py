@@ -964,31 +964,12 @@ async def cmd_execute_trade(args) -> dict:
     try:
         spec = json.loads(args.order)
         account = await _get_account(getattr(args, "account_number", None))
-        session = get_session()
         order = _build_order(spec)
         dry_run = getattr(args, "dry_run", True) or not _live_trading_enabled()
-
-        preflight = await account.place_order(session, order, dry_run=True)
-        errors = [str(e) for e in (getattr(preflight, "errors", None) or [])]
-        warnings = [str(w) for w in (getattr(preflight, "warnings", None) or [])]
-        bpe = getattr(preflight, "buying_power_effect", None)
-        bp_summary: dict = {"warnings": warnings}
-        if bpe:
-            bp_summary.update({
-                "current_buying_power": str(getattr(bpe, "current_buying_power", None)),
-                "new_buying_power": str(getattr(bpe, "new_buying_power", None)),
-                "change_in_buying_power": str(getattr(bpe, "change_in_buying_power", None)),
-            })
-        if errors:
-            return {"ok": False, "error": "pre-flight validation failed", "problems": errors, "buying_power": bp_summary}
-
-        if dry_run:
-            return {"ok": True, "dry_run": True, "account_number": account.account_number,
-                    "buying_power": bp_summary, "response": _serialize(preflight)}
-
-        response = await account.place_order(session, order, dry_run=False)
-        return {"ok": True, "dry_run": False, "account_number": account.account_number,
-                "buying_power": bp_summary, "response": _serialize(response)}
+        # cherrypit.broker owns the preflight-then-optionally-live submission core (src/_core);
+        # it places a live order only when live=True and the dry-run preflight had no errors.
+        return await _broker.place_order(account, get_session(), order, live=not dry_run,
+                                         serialize=_serialize)
     except Exception as exc:
         return _error(exc)
 

@@ -1,10 +1,10 @@
-"""Wiring tests for MEICAgent's credentials shim over cherrypit-core.
+"""Wiring tests for MEICAgent's credentials shim over cherrypick-core.
 
 The exhaustive keyring behavior (prefix entries, error translation, delete idempotency, etc.) lives in
-cherrypit-core's own test suite. Here we verify only that MEIC wires the shared CredentialStore with
+cherrypick-core's own test suite. Here we verify only that MEIC wires the shared CredentialStore with
 the right service name + legacy fallback and preserves the module-level API existing call sites import.
 No real keyring backend is touched — keyring's password functions are monkeypatched to an in-memory
-fake (patched globally, since the keyring calls now happen inside cherrypit-core).
+fake (patched globally, since the keyring calls now happen inside cherrypick-core).
 """
 from __future__ import annotations
 

@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Pull the cherrypit-core submodule at src/_core so imports resolve.
+          # Pull the cherrypick-core submodule at src/_core so imports resolve.
           submodules: recursive
 
       - name: Set up Python ${{ matrix.python-version }}

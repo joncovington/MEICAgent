@@ -1,6 +1,6 @@
-"""Wiring tests for MEICAgent's session shim over cherrypit-core's SessionManager.
+"""Wiring tests for MEICAgent's session shim over cherrypick-core's SessionManager.
 
-Session-caching / thread-local behavior is covered exhaustively in cherrypit-core's own test suite.
+Session-caching / thread-local behavior is covered exhaustively in cherrypick-core's own test suite.
 Here we verify MEIC wires a *thread-local* manager bound to its credential store (the deliberate design
 point: the streamer's DXLink loop and REST-poller thread must not share one Session) and preserves the
 get_session / reset_session API. tastytrade is never constructed — an injected fake factory stands in.
@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from cherrypit.auth import SessionManager
+from cherrypick.core.auth import SessionManager
 
 import session
 

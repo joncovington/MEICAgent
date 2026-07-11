@@ -512,7 +512,7 @@ def test_settlement_active_cash_settled_at_close_only():
 def test_events_still_force_close_cash_settled():
     # FOMC (13:30) and quarterly/triple-witching (14:00) remain hard overrides for ALL symbols,
     # including cash-settled — they do not get the 'left to expire' treatment on those days.
-    fomc = "2026-01-28"  # first 2026 FOMC day (now from cherrypit.calendar, not config)
+    fomc = "2026-01-28"  # first 2026 FOMC day (now from cherrypick.core.calendar, not config)
     q = "2026-03-31"     # first 2026 quarterly expiry
     a1, r1 = paper.force_close_active(_snap("13:35", date=fomc), BASE_CONFIG, is_cash_settled=True)
     a2, r2 = paper.force_close_active(_snap("14:05", date=q), BASE_CONFIG, is_cash_settled=True)
@@ -521,13 +521,13 @@ def test_events_still_force_close_cash_settled():
 
 
 def test_force_close_active_fomc_blackout():
-    fomc_date = "2026-01-28"  # a real 2026 FOMC day (cherrypit.calendar)
+    fomc_date = "2026-01-28"  # a real 2026 FOMC day (cherrypick.core.calendar)
     active, reason = paper.force_close_active(_snap("13:35", date=fomc_date), BASE_CONFIG, is_cash_settled=True)
     assert active is True and reason == "force_close_fomc"
 
 
 def test_force_close_active_quarterly_expiry_event():
-    q_date = "2026-03-31"  # a real 2026 quarterly expiry (cherrypit.calendar)
+    q_date = "2026-03-31"  # a real 2026 quarterly expiry (cherrypick.core.calendar)
     active, reason = paper.force_close_active(_snap("14:05", date=q_date), BASE_CONFIG, is_cash_settled=True)
     assert active is True and reason == "force_close_expiry_event"
 

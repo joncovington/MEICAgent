@@ -33,15 +33,15 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-# Allow running as `python src/tt.py` from any working directory, and make the cherrypit-core
-# submodule (src/_core) importable *before* the `from cherrypit import ...` lines below — mirroring
+# Allow running as `python src/tt.py` from any working directory, and make the cherrypick-core
+# submodule (src/_core) importable *before* the `from cherrypick.core import ...` lines below — mirroring
 # credentials.py's bootstrap, so a standalone CLI run doesn't depend on credentials being imported
-# first (import-sorting puts the cherrypit imports ahead of the local `import credentials`).
+# first (import-sorting puts the cherrypick.core imports ahead of the local `import credentials`).
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_core"))
 
-from cherrypit import broker as _broker
-from cherrypit import dxfeed as _dx
+from cherrypick.core import broker as _broker
+from cherrypick.core import dxfeed as _dx
 
 import credentials as _creds
 import gex_math
@@ -374,7 +374,7 @@ def _num(value: Any) -> float | None:
 
 
 async def _get_account(account_number: str | None = None):
-    # Delegates to cherrypit.broker (src/_core). The stored account number is passed in as the
+    # Delegates to cherrypick.core.broker (src/_core). The stored account number is passed in as the
     # default so the core stays decoupled from this module's credentials shim.
     return await _broker.resolve_account(
         get_session(), account_number,
@@ -424,13 +424,13 @@ async def _fetch_chain(symbol: str, expiration: str | None = None) -> dict:
     return await get_option_chain(session, symbol)
 
 
-# Thin re-exports of the shared option-chain helpers now implemented in cherrypit.broker (src/_core).
+# Thin re-exports of the shared option-chain helpers now implemented in cherrypick.core.broker (src/_core).
 _strike = _broker.strike_of
 _nearest_expiration = _broker.nearest_expiration
 _atm_window = _broker.atm_window
 
 
-# On-demand DXLink collectors — thin shims over cherrypit.dxfeed (src/_core). The broker session is
+# On-demand DXLink collectors — thin shims over cherrypick.core.dxfeed (src/_core). The broker session is
 # passed in explicitly, so a missing-credentials CredentialError surfaces to the caller here instead of
 # being swallowed inside the collector's broad except (the shared implementation never fetches it).
 async def _collect_events(event_cls, symbols: list[str], timeout: float,
@@ -952,7 +952,7 @@ async def cmd_get_working_orders(args) -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_order(spec: dict):
-    # Delegates to cherrypit.broker (src/_core): pure order construction (dict spec -> NewOrder),
+    # Delegates to cherrypick.core.broker (src/_core): pure order construction (dict spec -> NewOrder),
     # no submission. Handles the optional stop_trigger. cmd_execute_trade below still owns the
     # dry-run/live place_order call.
     return _broker.build_order(spec)
@@ -966,7 +966,7 @@ async def cmd_execute_trade(args) -> dict:
         account = await _get_account(getattr(args, "account_number", None))
         order = _build_order(spec)
         dry_run = getattr(args, "dry_run", True) or not _live_trading_enabled()
-        # cherrypit.broker owns the preflight-then-optionally-live submission core (src/_core); it
+        # cherrypick.core.broker owns the preflight-then-optionally-live submission core (src/_core); it
         # places a live order only when live=True, the dry-run preflight had no errors, and (when
         # configured) the account deploy-limit governor allows it. account_deploy_limit_pct defaults
         # to 0/off; a positive value caps deployed buying power at that % of account capacity.
@@ -1018,11 +1018,11 @@ async def cmd_close_position(args) -> dict:
 # ---------------------------------------------------------------------------
 
 def cmd_get_calendar(args) -> dict:
-    """Shared market calendar for a year (single source of truth from cherrypit.calendar):
+    """Shared market calendar for a year (single source of truth from cherrypick.core.calendar):
     NYSE holidays, FOMC days, quarterly + triple-witching expiries. Pure computation, no broker."""
     import datetime as _dt
 
-    from cherrypit import calendar as _cal
+    from cherrypick.core import calendar as _cal
     year = args.year or _dt.date.today().year
 
     def iso(ds):
@@ -1087,7 +1087,7 @@ def cmd_secrets_set(args) -> dict:
 
 def _compute_gex(chain_entries: list[dict], greeks: dict, oi: dict, spot: float) -> dict:
     """Compute GEX profile from chain entries, greeks cache, and OI cache — delegates to the shared
-    cherrypit.gex.compute_gex (via the gex_math shim). Output shape is unchanged."""
+    cherrypick.core.gex.compute_gex (via the gex_math shim). Output shape is unchanged."""
     return gex_math.compute_gex(chain_entries, greeks, oi, spot)
 
 

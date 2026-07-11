@@ -1,6 +1,6 @@
 """Lazy tastytrade OAuth session management.
 
-Thin shim over cherrypit-core's shared ``SessionManager`` (see ``cherrypit.auth``). Thread-local
+Thin shim over cherrypick-core's shared ``SessionManager`` (see ``cherrypick.core.auth``). Thread-local
 (``thread_local=True``): the streamer daemon runs the DXLink connection on the main thread's event
 loop and the REST poller on a separate thread with its own loop; tastytrade's Session holds an
 httpx.AsyncClient bound to whichever loop first uses it, so a session per thread keeps each bound to a
@@ -10,7 +10,7 @@ single loop (sharing one would silently hang awaits from the second loop). The `
 
 from __future__ import annotations
 
-from cherrypit.auth import SessionManager
+from cherrypick.core.auth import SessionManager
 
 import credentials
 

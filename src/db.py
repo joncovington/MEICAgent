@@ -7,13 +7,13 @@ import sqlite3
 import sys
 from datetime import UTC, datetime
 
-# Make the cherrypit-core submodule (src/_core) importable before the cherrypit import below,
+# Make the cherrypick-core submodule (src/_core) importable before the cherrypick.core import below,
 # mirroring credentials.py's bootstrap so this module works even when imported before credentials.
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_core"))
 
-from cherrypit import db as _db
-from cherrypit import profiles as _profiles
+from cherrypick.core import db as _db
+from cherrypick.core import profiles as _profiles
 
 try:
     import pytz
@@ -35,7 +35,7 @@ _DB_PATH = os.environ.get("MEIC_DB_PATH") or _DEFAULT_DB_PATH
 
 
 def _connect():
-    # cherrypit.db (src/_core) handles mkdir + row_factory=Row + pragmas. MEIC's additive/index/drop
+    # cherrypick.core.db (src/_core) handles mkdir + row_factory=Row + pragmas. MEIC's additive/index/drop
     # migrations in cmd_init_db stay module-local (they're not the plain additive-only form).
     return _db.connect(_DB_PATH, pragmas=("journal_mode=WAL", "foreign_keys=ON"))
 
@@ -436,14 +436,14 @@ def _rows_dicts(conn: sqlite3.Connection, where: list[str], params: list) -> lis
 
 
 def _ic_open_fee_fallback(symbol: str):
-    """Computed per-symbol IC open-fee from the shared tastytrade schedule (cherrypit.fees), replacing
+    """Computed per-symbol IC open-fee from the shared tastytrade schedule (cherrypick.core.fees), replacing
     MEIC's hand-maintained fee_estimate_fallback_per_contract constants. Returns None if the core
     submodule isn't present."""
     core = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_core")
     if os.path.isdir(core) and core not in sys.path:
         sys.path.insert(0, core)
     try:
-        from cherrypit.fees import ic_open_fee
+        from cherrypick.core.fees import ic_open_fee
     except Exception:
         return None
     return ic_open_fee(symbol)

@@ -1,6 +1,6 @@
 """Keyring-backed credential storage for tastytrade OAuth.
 
-Thin shim over cherrypit-core's shared ``CredentialStore`` (see ``cherrypit.auth``). The keyring logic
+Thin shim over cherrypick-core's shared ``CredentialStore`` (see ``cherrypick.core.auth``). The keyring logic
 now lives in the shared core so all suite modules behave identically; this module only supplies MEIC's
 parameters and re-exports the module-level API existing call sites already import, so nothing else
 changes. MEIC keeps its read-only fallback to the pre-rename ``tastytrade-mcp`` service so credentials
@@ -9,9 +9,9 @@ stored before the rename keep working (never written to going forward).
 
 from __future__ import annotations
 
-# Make the cherrypit-core submodule (src/_core) importable without an install, so a fresh
+# Make the cherrypick-core submodule (src/_core) importable without an install, so a fresh
 # `git clone --recursive` works out of the box. credentials.py is imported before any other code
-# needs `cherrypit` (session.py imports it first), so this one bootstrap covers the whole process.
+# needs `cherrypick.core` (session.py imports it first), so this one bootstrap covers the whole process.
 import sys as _sys
 from pathlib import Path as _Path
 
@@ -19,7 +19,7 @@ _CORE = _Path(__file__).resolve().parent / "_core"
 if _CORE.is_dir() and str(_CORE) not in _sys.path:
     _sys.path.insert(0, str(_CORE))
 
-from cherrypit.auth import (
+from cherrypick.core.auth import (
     ACCOUNT_NUMBER,
     ALL_SECRETS,
     CLIENT_SECRET,

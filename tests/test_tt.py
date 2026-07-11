@@ -436,7 +436,7 @@ def test_cmd_execute_trade_live_submits_order(monkeypatch):
 
 
 def test_cmd_execute_trade_deploy_governor_blocks_live_over_cap(monkeypatch):
-    # account_deploy_limit_pct wired from config -> cherrypit.broker deploy governor blocks a live
+    # account_deploy_limit_pct wired from config -> cherrypick.core.broker deploy governor blocks a live
     # order that would push deployed BP over the cap, before any live submit.
     order_spec = {"legs": [{"symbol": "XSP_C", "instrument_type": "Equity Option", "action": "Sell to Open", "quantity": 1}]}
 

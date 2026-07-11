@@ -35,7 +35,7 @@ _RISK_PROFILES_PATH = os.path.join(_REPO_ROOT, "config.risk.json")
 _CONFIG_PATH = os.path.join(_REPO_ROOT, "config.json")
 _DB_PY = os.path.join(_HERE, "db.py")
 
-# Shared market calendar from the cherrypit-core submodule (src/_core). Bootstrap it onto sys.path so
+# Shared market calendar from the cherrypick-core submodule (src/_core). Bootstrap it onto sys.path so
 # this pure engine is importable standalone (tests, subprocess) with no install — mirrors the
 # credentials.py bootstrap. The calendar computes NYSE holidays / quarterly + triple-witching expiries
 # from rules (no hand-maintained per-year config lists, and no drift like the old 2026-06-18 bug).
@@ -44,13 +44,13 @@ if os.path.isdir(_CORE) and _CORE not in sys.path:
     sys.path.insert(0, _CORE)
 from datetime import date as _date  # noqa: E402
 
-from cherrypit import calendar as _cal  # noqa: E402
-from cherrypit import fees as _fees  # noqa: E402
-from cherrypit import profiles as _profiles  # noqa: E402
+from cherrypick.core import calendar as _cal  # noqa: E402
+from cherrypick.core import fees as _fees  # noqa: E402
+from cherrypick.core import profiles as _profiles  # noqa: E402
 
 
 def _is_event_day(today, predicate) -> bool:
-    """Gate on a 'YYYY-MM-DD' snapshot date string (or None) via a cherrypit.calendar predicate."""
+    """Gate on a 'YYYY-MM-DD' snapshot date string (or None) via a cherrypick.core.calendar predicate."""
     if not today:
         return False
     try:
@@ -63,11 +63,11 @@ ALL_PROFILE_NAMES = ["conservative", "moderate", "aggressive", "very-aggressive"
 
 
 # ---------------------------------------------------------------------------
-# tastytrade fee schedule — one home in cherrypit.fees (src/_core). The schedule, constants, and
+# tastytrade fee schedule — one home in cherrypick.core.fees (src/_core). The schedule, constants, and
 # per-symbol broad-based index exchange fee live in the shared module (also used by db.py's live
 # fee estimate and, in equity form, by EarningsAgent). These thin wrappers keep MEIC's paper call
 # sites + tests stable and pass ndigits=4 so paper fees keep their exact sub-cent precision (2dp
-# rounding would break fee linearity across quantity). See cherrypit.fees.
+# rounding would break fee linearity across quantity). See cherrypick.core.fees.
 # ---------------------------------------------------------------------------
 
 def open_fees(symbol: str, quantity: int = 1) -> float:
@@ -105,7 +105,7 @@ def load_base_config() -> dict:
 def _merged_params(base_config: dict, profile: dict) -> dict:
     """Profile keys override base config keys, matching /set-risk-profile's partial-override
     semantics — unspecified keys (force_close_time, max_wing_width, etc.) fall through. Flat overlay
-    via cherrypit.profiles (src/_core)."""
+    via cherrypick.core.profiles (src/_core)."""
     return _profiles.merge_profile(base_config, profile)
 
 

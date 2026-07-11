@@ -1,4 +1,4 @@
-"""paper.py event-day gating now delegates to cherrypit.calendar (single source of truth).
+"""paper.py event-day gating now delegates to cherrypick.core.calendar (single source of truth).
 
 Locks in the fix for the old hardcoded-config drift where triple_witching_dates_2026 listed
 2026-06-18 (a Thursday) instead of the real 3rd Friday 2026-06-19.
@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-import paper  # noqa: E402  (import also bootstraps the src/_core cherrypit submodule)
+import paper  # noqa: E402  (import also bootstraps the src/_core cherrypick.core submodule)
 
 
 def test_event_day_helper_handles_none_and_bad_input():

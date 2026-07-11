@@ -26,7 +26,7 @@ pythonpath   = ["tests", "src"]
 [tool.ruff]
 line-length = 110
 target-version = "py311"
-# src/_core is the cherrypit-core submodule — it carries its own ruff config and CI; never lint it here.
+# src/_core is the cherrypick-core submodule — it carries its own ruff config and CI; never lint it here.
 extend-exclude = ["src/_core"]
 
 [tool.ruff.lint]
@@ -36,7 +36,7 @@ select = ["E", "F", "I", "W", "UP", "B"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-# The _core sys.path bootstrap deliberately runs before `import cherrypit` (see CUTOVER.md), so the
+# The _core sys.path bootstrap deliberately runs before `import cherrypick.core` (see CUTOVER.md), so the
 # imports below it are not at top of file by design.
 "src/credentials.py" = ["E402"]
 

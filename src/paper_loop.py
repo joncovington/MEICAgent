@@ -56,9 +56,9 @@ _TT = [sys.executable, str(_ROOT / "src" / "tt.py")]
 _DB = [sys.executable, str(_ROOT / "src" / "db.py"), "--db", _PAPER_DB]
 
 sys.path.insert(0, str(_ROOT / "src"))
-from cherrypit import calendar as _cal  # noqa: E402  (shared NYSE trading-day calendar)
+from cherrypick.core import calendar as _cal  # noqa: E402  (shared NYSE trading-day calendar)
 
-import paper  # noqa: E402  (also bootstraps src/_core onto sys.path for cherrypit)
+import paper  # noqa: E402  (also bootstraps src/_core onto sys.path for cherrypick.core)
 
 logger = logging.getLogger("paper_loop")
 _stop = False

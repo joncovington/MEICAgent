@@ -36,6 +36,11 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      # config.json is gitignored (holds local runtime settings); tests read it via load_base_config.
+      # Seed it from the committed template, matching a fresh-checkout setup.
+      - name: Seed runtime config
+        run: cp config.example.json config.json
+
       - name: Test (pytest)
         # `python -m pytest` (not bare `pytest`) puts the repo root on sys.path, matching local runs.
         run: python -m pytest

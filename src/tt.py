@@ -34,9 +34,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-# Allow running as `python src/tt.py` from any working directory.
+# Allow running as `python src/tt.py` from any working directory, and make the cherrypit-core
+# submodule (src/_core) importable *before* the `from cherrypit import ...` lines below — mirroring
+# credentials.py's bootstrap, so a standalone CLI run doesn't depend on credentials being imported
+# first (import-sorting puts the cherrypit imports ahead of the local `import credentials`).
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_core"))
 
+from cherrypit import broker as _broker
 from cherrypit import dxfeed as _dx
 
 import credentials as _creds
@@ -370,15 +375,12 @@ def _num(value: Any) -> float | None:
 
 
 async def _get_account(account_number: str | None = None):
-    from tastytrade.account import Account
-    session = get_session()
-    number = account_number or _creds.get_secret(_creds.ACCOUNT_NUMBER)
-    if number:
-        return await Account.get(session, number)
-    accounts = await Account.get(session)
-    if not accounts:
-        raise RuntimeError("No accounts found for these credentials.")
-    return accounts[0]
+    # Delegates to cherrypit.broker (src/_core). The stored account number is passed in as the
+    # default so the core stays decoupled from this module's credentials shim.
+    return await _broker.resolve_account(
+        get_session(), account_number,
+        default_number=_creds.get_secret(_creds.ACCOUNT_NUMBER),
+    )
 
 
 async def _fetch_chain(symbol: str, expiration: str | None = None) -> dict:
@@ -423,28 +425,10 @@ async def _fetch_chain(symbol: str, expiration: str | None = None) -> dict:
     return await get_option_chain(session, symbol)
 
 
-def _nearest_expiration(expirations: list[date], target_days: int = 0) -> date:
-    today = date.today()
-    return min(expirations, key=lambda e: abs((e - today).days - target_days))
-
-
-def _strike(option: Any) -> float | None:
-    try:
-        return float(option.strike_price)
-    except (TypeError, ValueError):
-        return None
-
-
-def _atm_window(options: list, strike_count: int, around_price: float | None) -> list:
-    strikes = sorted({s for s in (_strike(o) for o in options) if s is not None})
-    if not strikes:
-        return options
-    center = around_price if around_price is not None else strikes[len(strikes) // 2]
-    nearest = min(range(len(strikes)), key=lambda i: abs(strikes[i] - center))
-    lo = max(0, nearest - strike_count)
-    hi = min(len(strikes), nearest + strike_count + 1)
-    keep = set(strikes[lo:hi])
-    return [o for o in options if _strike(o) in keep]
+# Thin re-exports of the shared option-chain helpers now implemented in cherrypit.broker (src/_core).
+_strike = _broker.strike_of
+_nearest_expiration = _broker.nearest_expiration
+_atm_window = _broker.atm_window
 
 
 # On-demand DXLink collectors — thin shims over cherrypit.dxfeed (src/_core). The broker session is
@@ -482,11 +466,9 @@ async def cmd_get_connection_status(_args) -> dict:
         status["hint"] = "Run `python src/tt.py secrets_set` to store credentials."
         return status
     try:
-        from tastytrade.account import Account
         session = get_session()
-        accounts = await Account.get(session)
+        status["account_count"] = await _broker.account_count(session)
         status["connected"] = True
-        status["account_count"] = len(accounts)
     except Exception as exc:
         status["ok"] = False
         status["connected"] = False
@@ -525,20 +507,7 @@ async def cmd_get_positions(args) -> dict:
 
 async def cmd_list_accounts(_args) -> dict:
     try:
-        from tastytrade.account import Account
-        session = get_session()
-        accounts = await Account.get(session)
-        return {
-            "ok": True,
-            "accounts": [
-                {
-                    "account_number": a.account_number,
-                    "nickname": getattr(a, "nickname", None),
-                    "account_type": getattr(a, "account_type_name", None),
-                }
-                for a in accounts
-            ],
-        }
+        return {"ok": True, "accounts": await _broker.list_accounts(get_session())}
     except Exception as exc:
         return _error(exc)
 

@@ -1,0 +1,9 @@
+# Pre-commit hooks. Setup:  pip install pre-commit && pre-commit install
+# Runs the same ruff config CI enforces (pyproject [tool.ruff]) on staged files before each commit.
+# The src/_core submodule is a separate repo; its files aren't in this index, so it's untouched.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.21
+    hooks:
+      - id: ruff-check
+        args: [--fix]

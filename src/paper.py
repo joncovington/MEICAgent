@@ -45,6 +45,7 @@ if os.path.isdir(_CORE) and _CORE not in sys.path:
 from datetime import date as _date  # noqa: E402
 
 from cherrypit import calendar as _cal  # noqa: E402
+from cherrypit import profiles as _profiles  # noqa: E402
 
 
 def _is_event_day(today, predicate) -> bool:
@@ -125,9 +126,7 @@ def expire_fees() -> float:
 # ---------------------------------------------------------------------------
 
 def load_profiles() -> dict:
-    with open(_RISK_PROFILES_PATH) as f:
-        data = json.load(f)
-    return data["profiles"]
+    return _profiles.load_profiles(external_path=_RISK_PROFILES_PATH)
 
 
 def load_base_config() -> dict:
@@ -137,10 +136,9 @@ def load_base_config() -> dict:
 
 def _merged_params(base_config: dict, profile: dict) -> dict:
     """Profile keys override base config keys, matching /set-risk-profile's partial-override
-    semantics — unspecified keys (force_close_time, max_wing_width, etc.) fall through."""
-    merged = dict(base_config)
-    merged.update({k: v for k, v in profile.items() if not k.startswith("_")})
-    return merged
+    semantics — unspecified keys (force_close_time, max_wing_width, etc.) fall through. Flat overlay
+    via cherrypit.profiles (src/_core)."""
+    return _profiles.merge_profile(base_config, profile)
 
 
 # ---------------------------------------------------------------------------

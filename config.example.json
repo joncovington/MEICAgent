@@ -29,6 +29,8 @@
   "trading_window_and_caps_header": "===== Trading Window & Daily Caps =====",
   "enable_live_trading": false,
   "_enable_live_trading_note": "Set to true to allow execute_trade/adjust_order/close_position to submit real orders. Requires tastytrade OAuth credentials in the OS keyring (via `python src/tt.py secrets_set`). Left false in this example so a fresh setup starts in dry-run.",
+  "account_deploy_limit_pct": 0,
+  "_account_deploy_limit_pct_note": "Account-level deploy cap (via cherrypit.risk). 0 = OFF (default). A positive value (e.g. 50) blocks a LIVE execute_trade whose buying power would push total deployed BP above that percent of account capacity (used + available derivative buying power). Fail-closed: if account state can't be read, the live order is blocked. Enforced only on live submits; a dry-run reports the governor verdict without blocking. Does not affect paper trading.",
   "loop_interval_minutes": 5,
   "entry_window_start": "10:00",
   "entry_window_end": "14:30",

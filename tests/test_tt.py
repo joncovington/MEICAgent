@@ -435,6 +435,49 @@ def test_cmd_execute_trade_live_submits_order(monkeypatch):
     assert calls == [True, False]
 
 
+def test_cmd_execute_trade_deploy_governor_blocks_live_over_cap(monkeypatch):
+    # account_deploy_limit_pct wired from config -> cherrypit.broker deploy governor blocks a live
+    # order that would push deployed BP over the cap, before any live submit.
+    order_spec = {"legs": [{"symbol": "XSP_C", "instrument_type": "Equity Option", "action": "Sell to Open", "quantity": 1}]}
+
+    class _BPE:
+        change_in_buying_power = "-5300"  # consumes 5300 BP
+
+    class _Preflight:
+        errors = []
+        warnings = []
+        buying_power_effect = _BPE()
+
+    class _Balances:
+        used_derivative_buying_power = "0"
+        derivative_buying_power = "10000"  # capacity 10000, 50% cap = 5000 < 5300
+
+    calls = []
+
+    class _FakeAccount:
+        account_number = "ACC1"
+        async def place_order(self, session_obj, order, dry_run):
+            calls.append(dry_run)
+            return _Preflight()
+        async def get_balances(self, session_obj):
+            return _Balances()
+
+    async def _fake_get_account(account_number=None):
+        return _FakeAccount()
+
+    monkeypatch.setattr(tt, "_get_account", _fake_get_account)
+    monkeypatch.setattr(tt, "get_session", lambda: object())
+    monkeypatch.setattr(tt, "_live_trading_enabled", lambda: True)
+    monkeypatch.setattr(tt, "_load_config", lambda: {"account_deploy_limit_pct": 50})
+
+    args = type("Args", (), {"dry_run": False, "order": json.dumps(order_spec), "account_number": None})()
+    result = asyncio.run(tt.cmd_execute_trade(args))
+    assert result["ok"] is False
+    assert result["error"] == "account deploy limit exceeded"
+    assert result["governor"]["deploy_governor"] == "enforced"
+    assert calls == [True]  # blocked before the live submit
+
+
 # --- cmd_secrets_status -------------------------------------------------------
 
 def test_cmd_secrets_status_reports_ready_when_required_set(monkeypatch):

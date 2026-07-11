@@ -966,10 +966,13 @@ async def cmd_execute_trade(args) -> dict:
         account = await _get_account(getattr(args, "account_number", None))
         order = _build_order(spec)
         dry_run = getattr(args, "dry_run", True) or not _live_trading_enabled()
-        # cherrypit.broker owns the preflight-then-optionally-live submission core (src/_core);
-        # it places a live order only when live=True and the dry-run preflight had no errors.
-        return await _broker.place_order(account, get_session(), order, live=not dry_run,
-                                         serialize=_serialize)
+        # cherrypit.broker owns the preflight-then-optionally-live submission core (src/_core); it
+        # places a live order only when live=True, the dry-run preflight had no errors, and (when
+        # configured) the account deploy-limit governor allows it. account_deploy_limit_pct defaults
+        # to 0/off; a positive value caps deployed buying power at that % of account capacity.
+        return await _broker.place_order(
+            account, get_session(), order, live=not dry_run, serialize=_serialize,
+            deploy_limit_pct=_load_config().get("account_deploy_limit_pct") or None)
     except Exception as exc:
         return _error(exc)
 

@@ -7,6 +7,13 @@ import sqlite3
 import sys
 from datetime import UTC, datetime
 
+# Make the cherrypit-core submodule (src/_core) importable before the cherrypit import below,
+# mirroring credentials.py's bootstrap so this module works even when imported before credentials.
+sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_core"))
+
+from cherrypit import db as _db
+
 try:
     import pytz
     _ET = pytz.timezone("America/New_York")
@@ -27,12 +34,9 @@ _DB_PATH = os.environ.get("MEIC_DB_PATH") or _DEFAULT_DB_PATH
 
 
 def _connect():
-    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    # cherrypit.db (src/_core) handles mkdir + row_factory=Row + pragmas. MEIC's additive/index/drop
+    # migrations in cmd_init_db stay module-local (they're not the plain additive-only form).
+    return _db.connect(_DB_PATH, pragmas=("journal_mode=WAL", "foreign_keys=ON"))
 
 
 def _out(data):
